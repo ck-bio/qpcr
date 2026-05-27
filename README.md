@@ -1,4 +1,4 @@
-# qPCR*
+# qPCR* [images/logo.svg]
 A browser-based, qPCR fold change calculator aimed at students and researchers alike. No installation. No server. No data leaves your machine.
 Built to replace messy Excel workflows that accumulate errors and produce invalid results.
 
