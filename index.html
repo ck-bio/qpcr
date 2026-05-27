@@ -1,0 +1,2251 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>qPCR auto-calc</title>
+  <meta name="description" content="Browser-based qPCR fold change calculator with MIQE 2.0-compliant statistics. Single-file, no install.">
+
+  <!-- Favicon derived from the logo: simple rising-curve mark -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230d1117'/><path d='M 18 78 Q 46 78, 52 48 T 84 16' stroke='%232dd4bf' stroke-width='10' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='52' cy='48' r='7' fill='%230d1117' stroke='%232dd4bf' stroke-width='4'/></svg>">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <style>
+    /* ═══════════════════════════════════════════════════════════════════
+      1. CSS VARIABLES (THEME TOKENS)
+      This is the 'paint palette' of the app. By keeping colours as variables,
+      the Javascript can instantly swap from dark to light mode without 
+      having to rewrite any individual component styles.
+      ═══════════════════════════════════════════════════════════════════ 
+    */
+    :root[data-theme="dark"] {
+      --bg:#0d1117; --bg-surface:#161b22; --bg-card:#1c2128; --border:#30363d;
+      --accent:#2dd4bf; --accent-dim:rgba(45,212,191,0.10);
+      --text:#e6edf3; --text-muted:#7d8590; --text-dim:#484f58;
+      --warning:#e3a03a; --error:#f85149; --header-bg:#0d1117;
+      --shadow:0 1px 4px rgba(0,0,0,0.55);
+      --fc-up:rgba(45,175,165,0.52); --fc-down:rgba(195,140,48,0.52); --fc-flat:rgba(120,130,140,0.32);
+      --sel-bg:rgba(45,212,191,0.18); --sel-border:#2dd4bf;
+      --qc-bg:rgba(248,81,73,0.08); --qc-border:#f85149;
+    }
+    :root[data-theme="light"] {
+      --bg:#f0f4f8; --bg-surface:#ffffff; --bg-card:#f6f8fa; --border:#d0d7de;
+      --accent:#0d9488; --accent-dim:rgba(13,148,136,0.09);
+      --text:#1c2128; --text-muted:#57606a; --text-dim:#b1bac4;
+      --warning:#9a6700; --error:#cf222e; --header-bg:#ffffff;
+      --shadow:0 1px 4px rgba(0,0,0,0.08), 0 2px 8px rgba(0,0,0,0.04);
+      --fc-up:rgba(13,148,136,0.38); --fc-down:rgba(180,120,20,0.38); --fc-flat:rgba(100,110,120,0.30);
+      --sel-bg:rgba(13,148,136,0.14); --sel-border:#0d9488;
+      --qc-bg:rgba(207,34,46,0.08); --qc-border:#cf222e;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { 
+      background: var(--bg); color: var(--text); font-family: 'Syne', sans-serif; 
+      min-height: 100vh; transition: background 0.2s, color 0.2s; 
+      /* Disables accidental text highlighting when dragging to select cells */
+      user-select: none; 
+    }
+    input { user-select: text; } /* Re-enables normal text selection inside input boxes */
+    /* While drag-selecting cells, globally suppress text selection so the
+       user's drag doesn't paint a native blue text highlight over everything. */
+    body.cell-dragging, body.cell-dragging * { user-select: none !important; }
+    body.cell-dragging input { pointer-events: none; }
+
+    /* ═══════════════════════════════════════════════════════════════════
+      2. THE MASTER SWITCH (SIMPLE vs ADVANCED MODE)
+      These CSS rules control the visibility of the MIQE 2.0 features.
+      If the body does NOT have the 'mode-advanced' class, these elements
+      completely disappear from the layout, keeping the UI clean for beginners.
+      ═══════════════════════════════════════════════════════════════════ 
+    */
+    .adv-feature { display: none !important; }
+    body.mode-advanced .adv-feature { display: flex !important; }
+
+    /* The visual toggle switch in the header */
+    .master-switch {
+      display: flex; align-items: center; gap: 0.5rem; font-size: 0.7rem; 
+      font-weight: 600; color: var(--text-muted); cursor: pointer;
+      /* Native button reset — it's a <button> for a11y but shouldn't look like one */
+      background: transparent; border: none; padding: 0;
+      font-family: inherit;
+    }
+    .master-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+    .master-switch .track {
+      width: 36px; height: 18px; background: var(--border); border-radius: 9px;
+      position: relative; transition: background 0.2s;
+    }
+    .master-switch .knob {
+      width: 14px; height: 14px; background: var(--text); border-radius: 50%;
+      position: absolute; top: 2px; left: 2px; transition: transform 0.2s;
+    }
+    body.mode-advanced .master-switch .track { background: var(--accent); }
+    body.mode-advanced .master-switch .knob { transform: translateX(18px); background: var(--bg-surface); }
+    body.mode-advanced .ms-label-adv { color: var(--accent); }
+    body:not(.mode-advanced) .ms-label-simp { color: var(--text); }
+
+
+    /* ── Standard UI Layout & Headers ── */
+    header { 
+      background: var(--header-bg); border-bottom: 1px solid var(--border);
+      padding: 0 2rem; height: 64px; display: flex; align-items: center;
+      justify-content: space-between; position: sticky; top: 0; z-index: 100;
+      box-shadow: var(--shadow); 
+    }
+    .header-left { display: flex; flex-direction: column; justify-content: center; }
+    .header-left .title { 
+      font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em; 
+      line-height: 1.2; display: flex; align-items: center; 
+    }
+    .header-left .subtitle { 
+      font-size: 0.68rem; color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace; margin-top: 2px; 
+    }
+    .header-right { display: flex; align-items: center; gap: 1.5rem; }
+
+    /* Buttons */
+    .btn { 
+      display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.4rem 0.85rem;
+      border-radius: 6px; border: 1px solid var(--border); background: var(--bg-card);
+      color: var(--text-muted); font-family: 'Syne', sans-serif; font-size: 0.78rem;
+      font-weight: 600; cursor: pointer; transition: border-color 0.15s, color 0.15s; 
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-sm { padding: 0.32rem 0.65rem; font-size: 0.72rem; }
+    /* Icon-only variant — smaller and square-ish, for undo/redo */
+    .btn.icon-only { padding: 0.35rem 0.5rem; gap: 0; }
+    
+    /* Icon Button (Theme Toggle) */
+    .icon-btn { 
+      width: 34px; height: 34px; border-radius: 7px; display: flex; align-items: center;
+      justify-content: center; cursor: pointer; border: 1px solid var(--border);
+      background: var(--bg-card); color: var(--text); font-size: 0.95rem;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Layout Panels */
+    main { max-width: 1560px; margin: 0 auto; padding: 1.5rem 2rem; }
+    .panel { 
+      background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px;
+      overflow: hidden; margin-bottom: 1.25rem; 
+    }
+    .panel-header { 
+      padding: 0.8rem 1.4rem; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); 
+    }
+    .panel-header h2 { 
+      font-size: 0.68rem; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--text-muted);
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    /* Panel header icons — monochrome SVGs that inherit text colour.
+       Sized just a hair larger than the cap-height of the 0.68rem label so
+       they read as emblems, not decorations. */
+    .panel-icon { width: 14px; height: 14px; flex-shrink: 0; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+    .panel-header .actions { display: flex; gap: 0.5rem; align-items: center; }
+
+    /* Gene block — stacks gene name input above its efficiency stepper */
+    .gene-block { display: flex; flex-direction: column; }
+    /* The gene-name input and its colour swatch sit side-by-side.
+       The swatch mirrors the stepper's visual language — same border, same
+       rounded corners, same hover accent — so the setup strip feels coherent. */
+    .gene-name-row { display: flex; gap: 0.4rem; align-items: stretch; }
+    .gene-name-row > .gene-name-input { flex: 1; min-width: 0; }
+    .gene-color {
+      /* Match the gene-name input's box dimensions exactly.
+         Matches .field input[type="text"] padding (~0.48rem vertical) which
+         renders at roughly 34px tall with JetBrains Mono 0.85rem. */
+      width: 34px; height: auto; flex-shrink: 0;
+      border: 1px solid var(--border); border-radius: 6px;
+      background: var(--bg-card); cursor: pointer;
+      padding: 3px;
+      transition: border-color 0.15s;
+      /* Kill the native inset so the swatch reads as a flat square button */
+      -webkit-appearance: none; appearance: none;
+    }
+    .gene-color:hover { border-color: var(--accent); }
+    .gene-color:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
+    .gene-color::-webkit-color-swatch-wrapper { padding: 0; }
+    .gene-color::-webkit-color-swatch { border: none; border-radius: 3px; }
+    .gene-color::-moz-color-swatch   { border: none; border-radius: 3px; }
+
+    /* adv-feature inside gene-block uses flex-direction from parent — override to column */
+    .gene-block .adv-feature { flex-direction: column !important; }
+
+    .config-body {
+      padding: 1rem 1.4rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 0;
+      flex-wrap: wrap;  /* Let the whole reps cluster drop below genes at narrow widths */
+    }
+    .config-genes {
+      display: flex;
+      gap: 1rem;
+      flex: 1 1 520px;    /* Don't shrink below a sensible width for two gene inputs */
+      min-width: 0;
+    }
+    .config-divider {
+      width: 1px;
+      background: var(--border);
+      align-self: stretch;
+      margin: 0 1.25rem;
+      flex-shrink: 0;
+    }
+    .config-reps {
+      display: flex;
+      gap: 1rem;
+      flex-shrink: 0;
+      align-items: flex-start;
+    }
+    /* At narrow widths the reps cluster wraps to a new row; hide the divider
+       so it doesn't become a random horizontal line */
+    @media (max-width: 900px) {
+      .config-divider { display: none; }
+      .config-genes, .config-reps { flex: 1 1 100%; }
+    }
+    .field { display: flex; flex-direction: column; gap: 0.35rem; }
+    .field label { 
+      font-size: 0.67rem; font-weight: 700; color: var(--text-muted);
+      letter-spacing: 0.07em; text-transform: uppercase; 
+    }
+    .field input[type="text"] {
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+      padding: 0.48rem 0.7rem; color: var(--text); font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem; transition: border-color 0.15s; outline: none; width: 100%;
+    }
+    .field input:focus { border-color: var(--accent); }
+
+    /* Replicate Steppers (The + and - buttons) */
+    .stepper { 
+      display: flex; align-items: stretch; background: var(--bg-card);
+      border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+      transition: border-color 0.15s; 
+    }
+    .stepper:focus-within { border-color: var(--accent); }
+    .stepper input[type="number"] { 
+      flex: 1; min-width: 0; border: none; background: transparent;
+      color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 0.88rem;
+      text-align: center; outline: none; padding: 0.42rem 0; -moz-appearance: textfield; 
+    }
+    .stepper input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .step-btn {
+      width: 30px; flex-shrink: 0; border: none; background: transparent;
+      color: var(--text-muted); font-size: 1.05rem; line-height: 1; cursor: pointer;
+      transition: background 0.12s, color 0.12s; user-select: none;
+      outline: none; /* Replaced by the custom focus ring below */
+    }
+    .step-btn:hover  { background: var(--accent-dim); color: var(--accent); }
+    .step-btn:focus-visible {
+      background: var(--accent-dim); color: var(--accent);
+      box-shadow: inset 0 0 0 2px var(--accent);
+    }
+    .step-btn.dec { border-right: 1px solid var(--border); }
+    .step-btn.inc { border-left:  1px solid var(--border); }
+
+    /* NCBI Gene Dropdown Portal */
+    .gene-dropdown { 
+      position: fixed; background: var(--bg-surface); border: 1px solid var(--accent);
+      border-radius: 8px; z-index: 9999; max-height: 260px; overflow-y: auto;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.45); display: none; min-width: 260px; 
+    }
+    .gene-dropdown.open { display: block; }
+    .gene-item { 
+      padding: 0.44rem 0.8rem; cursor: pointer; display: flex; gap: 0.6rem;
+      align-items: baseline; transition: background 0.1s; 
+    }
+    .gene-item:hover, .gene-item.active { background: var(--accent-dim); }
+    .gene-sym { font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; color: var(--accent); font-weight: 600; min-width: 80px; }
+    .gene-name { font-size: 0.7rem; color: var(--text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .gene-loading { padding: 0.6rem 0.8rem; font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; color: var(--text-dim); }
+
+    /* ── Ct Data Table Styling ── */
+    .table-wrap { overflow-x: auto; }
+    table.in-table { 
+      width: 100%; border-collapse: collapse;
+      font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; 
+    }
+    /* Sticky header — stays pinned to the top of the viewport while scrolling
+       a long table. Both thead rows share the same behaviour; z-index stacks
+       them above body rows but below open dropdowns (z:9999). The second
+       thead row's `top` offset is measured & set in JS (see syncStickyOffset)
+       so font-loading reflows don't cause the two rows to overlap. */
+    table.in-table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    table.in-table thead tr:first-child th {
+      background: var(--bg-card); border-bottom: 1px solid var(--border);
+      font-size: 0.76rem; font-weight: 700; padding: 0.55rem 0.6rem; text-align: center; 
+    }
+    table.in-table thead tr:first-child .th-reorder { min-width: 22px; padding: 0; }
+    table.in-table thead tr:first-child .th-sample  { text-align: left; padding-left: 0.7rem; min-width: 130px; }
+    table.in-table thead tr:first-child .th-group   { text-align: left; min-width: 100px; }
+    table.in-table thead tr:first-child .th-ctrl    { min-width: 50px; font-size: 0.66rem; }
+    table.in-table thead tr:first-child .th-gene-target { color: var(--gene-target, var(--accent));  border-top: 2px solid var(--gene-target, var(--accent)); }
+    table.in-table thead tr:first-child .th-gene-ref    { color: var(--gene-ref, var(--warning));    border-top: 2px solid var(--gene-ref, var(--warning)); }
+    table.in-table thead tr:first-child .th-flag { min-width: 22px; }
+
+    table.in-table thead tr:last-child th {
+      background: var(--bg-card); border-bottom: 2px solid var(--border);
+      font-size: 0.62rem; font-weight: 600; letter-spacing: 0.05em; color: var(--text-dim); padding: 0.32rem 0.4rem; 
+    }
+    table.in-table thead tr:last-child .sub-target { color: var(--gene-target, var(--accent)); }
+    table.in-table thead tr:last-child .sub-ref    { color: var(--gene-ref, var(--warning)); }
+
+    table.in-table td { padding: 0.28rem 0.4rem; border-bottom: 1px solid var(--border); text-align: center; }
+    table.in-table td:first-child { padding-left: 0; }
+    table.in-table td.td-sample { padding-left: 0.7rem; text-align: left; }
+    table.in-table td.td-group  { text-align: left; }
+    table.in-table tr:hover td { background: var(--accent-dim); }
+    
+    /* Drag-to-reorder highlights */
+    table.in-table tr.dragging { opacity: 0.45; }
+    table.in-table tr.drag-over-top    td { box-shadow: inset 0 2px 0 var(--accent); }
+    table.in-table tr.drag-over-bottom td { box-shadow: inset 0 -2px 0 var(--accent); }
+
+    table.in-table input[type="text"], table.in-table input[type="number"] {
+      background: transparent; border: 1px solid transparent; color: var(--text);
+      font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; outline: none;
+      padding: 0.22rem 0.3rem; border-radius: 4px; transition: border-color 0.12s, background 0.12s; width: 100%; 
+    }
+    table.in-table input[type="text"]   { min-width: 95px; }
+    table.in-table input[type="number"] { text-align: right; min-width: 62px; -moz-appearance: textfield; }
+    table.in-table input[type="number"]::-webkit-inner-spin-button { opacity: 0; }
+    table.in-table input::placeholder { color: var(--text-dim); opacity: 0.4; }
+    table.in-table input:focus { border-color: var(--accent); background: var(--accent-dim); }
+    
+    /* Dynamic Interaction States */
+    table.in-table input.sel { background: var(--sel-bg) !important; border-color: var(--sel-border) !important; outline: none; }
+    table.in-table input.qc-flag { background: var(--qc-bg) !important; border-color: var(--qc-border) !important; }
+
+    .drag-handle {
+      display: inline-block; padding: 0.25rem 0.35rem; color: var(--text-dim);
+      font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; cursor: grab; user-select: none; 
+    }
+    .drag-handle:active { cursor: grabbing; }
+
+    /* "Set / CTRL" toggle button in the Ctrl column.
+       Inactive state reads "set" in muted text; active reads "CTRL" in accent.
+       Keeping it small and pill-shaped lets it sit comfortably in a tight column. */
+    .ctrl-btn {
+      background: transparent; border: 1px solid var(--border); border-radius: 4px;
+      padding: 0.12rem 0.48rem;
+      font-family: 'JetBrains Mono', monospace; font-size: 0.62rem;
+      font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+      color: var(--text-dim); cursor: pointer;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+      min-width: 42px;
+    }
+    .ctrl-btn:hover { color: var(--accent); border-color: var(--accent); }
+    .ctrl-btn.is-ctrl {
+      color: var(--accent); border-color: var(--accent); background: var(--accent-dim);
+    }
+    .ctrl-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    /* Centre Ct numeric values — they're text inputs, so override default left-align */
+    table.in-table td input[data-f="t"],
+    table.in-table td input[data-f="r"] {
+      text-align: center !important;
+    }
+
+    .row-flag {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 20px; height: 20px; border-radius: 4px; cursor: help; color: var(--error); font-weight: 700; font-size: 0.78rem;
+    }
+    .row-flag.hidden { visibility: hidden; }
+
+    .rm-btn {
+      background: none; border: none; color: var(--text-dim); cursor: pointer;
+      padding: 0.18rem 0.3rem; border-radius: 4px;
+      transition: color 0.12s, transform 0.1s ease-out;
+    }
+    .rm-btn:hover { color: var(--error); transform: scale(1.15); }
+    .rm-btn:active { transform: scale(0.95); }
+
+    /* ── Live Status & QC Warning Strips ── */
+    .save-badge {
+      font-size: 0.62rem; font-family: 'JetBrains Mono', monospace;
+      color: var(--text-dim); display: flex; align-items: center; gap: 0.3rem;
+      transition: color 0.25s ease;
+    }
+    .save-badge .dot { font-size: 0.5rem; transition: color 0.25s ease; }
+    .save-badge.unsaved .dot { animation: savePulse 1.6s ease-in-out infinite; }
+    .save-badge.saved   { color: var(--accent); }
+    @keyframes savePulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    /* Custom focus ring for stepper buttons — keyboard-only, subtle accent halo */
+    .step-btn:focus-visible {
+      outline: none;
+      box-shadow: inset 0 0 0 2px var(--accent);
+    }
+
+    /* Shown on boot if localStorage is unavailable (private-mode Safari etc.) */
+    .ls-warning {
+      background: var(--qc-bg); color: var(--error); border-bottom: 1px solid var(--qc-border);
+      font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
+      padding: 0.55rem 1.4rem; text-align: center;
+    }
+    .ls-warning.hidden { display: none; }
+    
+    .qc-strip {
+      display: none; padding: 0.6rem 1.4rem; border-top: 1px solid var(--qc-border);
+      background: var(--qc-bg); font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--error); line-height: 1.55;
+    }
+    .qc-strip.visible { display: block; }
+    .qc-strip .qc-label { font-weight: 700; letter-spacing: 0.04em; }
+    .qc-strip ul { margin: 0.25rem 0 0 1.1rem; padding: 0; list-style: disc; color: var(--text); }
+
+    /* ── Results Table ── */
+    .results-empty { padding: 2.5rem 2rem; text-align: center; color: var(--text-dim); font-size: 0.78rem; font-family: 'JetBrains Mono', monospace; }
+    table.res-table { width: 100%; border-collapse: collapse; }
+    table.res-table th {
+      padding: 0.58rem 1.1rem; text-align: left; font-family: 'Syne', sans-serif;
+      font-size: 0.66rem; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
+      color: var(--text-muted); background: var(--bg-card); border-bottom: 1px solid var(--border);
+      white-space: nowrap; cursor: pointer; user-select: none;
+    }
+    table.res-table th:hover { color: var(--accent); }
+    table.res-table th.sorted { color: var(--accent); }
+    .sort-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      margin-left: 4px; opacity: 0.3; width: 10px; height: 10px; vertical-align: middle;
+      transition: opacity 0.15s;
+    }
+    .sorted .sort-icon { opacity: 1; }
+    .sort-icon svg { width: 100%; height: 100%; }
+    table.res-table td {
+      padding: 0.58rem 1.1rem; border-bottom: 1px solid var(--border);
+      font-family: 'JetBrains Mono', monospace; font-size: 0.81rem; 
+    }
+    table.res-table tr:last-child td { border-bottom: none; }
+
+    .sname { font-family: 'Syne', sans-serif; font-weight: 600; font-size: 0.83rem; }
+    .ctrl-pill { 
+      display: inline-block; font-size: 0.56rem; font-family: 'JetBrains Mono', monospace;
+      padding: 0.09rem 0.35rem; background: var(--accent-dim); border: 1px solid var(--accent);
+      color: var(--accent); border-radius: 3px; margin-left: 6px; vertical-align: middle; 
+    }
+
+    /* FC value colouring — now by gene, not by direction.
+       The target gene's colour is the headline visual; flat/null values
+       fall back to muted text. Multi-gene refactor will key these by gene id. */
+    .fc-val.present  { color: var(--gene-target, var(--accent)); font-weight: 600; }
+    .fc-val.flat     { color: var(--text-muted); }
+
+    /* Sum-range: the ±SD band shown on group rows */
+    .sum-range          { font-size: 0.76rem; }
+    .sum-range.present  { color: var(--gene-target, var(--accent)); }
+    .sum-range.flat     { color: var(--text-dim); }
+
+    .sum-group { font-family: 'Syne', sans-serif; font-weight: 600; font-size: 0.83rem; }
+    .sum-dim   { color: var(--text-dim); }
+
+    /* Two-column bottom row: results table left, chart right.
+       The chart column has a fixed min-width so it never collapses to nothing. */
+    .results-row {
+      display: grid;
+      grid-template-columns: 1fr minmax(340px, 480px);
+      gap: 1.25rem;
+      align-items: start;
+    }
+    .results-row > .panel { margin-bottom: 0; }
+
+    /* ── Merged group-summary table ── */
+    /* Group rows are clickable — cursor pointer signals this */
+    tr.group-row { cursor: pointer; }
+    tr.group-row td { font-weight: 600; }
+    tr.group-row:hover td { background: var(--accent-dim); }
+    tr.group-row .expand-icon {
+      display: inline-block;
+      width: 14px; height: 14px;
+      margin-right: 0.4rem;
+      vertical-align: middle;
+      transition: transform 0.15s;
+      color: var(--text-dim);
+    }
+    tr.group-row.expanded .expand-icon { transform: rotate(90deg); }
+
+    /* Sample-level child rows — hidden by default, shown when group expanded */
+    tr.sample-row { display: none; }
+    tr.sample-row.visible { display: table-row; }
+    tr.sample-row td { padding-left: 2.4rem; font-weight: 400;
+      font-size: 0.77rem; color: var(--text-muted); border-bottom-style: dashed; }
+    tr.sample-row:last-of-type td { border-bottom-style: solid; }
+
+    .chart-body { padding: 1.25rem 1.4rem; }
+    .chart-svg-wrap { width: 100%; overflow: hidden; }
+    .chart-svg-wrap svg { width: 100%; height: auto; display: block; }
+
+    .live-dot { 
+      display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+      background: var(--accent); animation: pulse 2s ease-in-out infinite; vertical-align: middle; margin-right: 4px; 
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
+    .res-status { font-size: 0.66rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+
+    .toast { 
+      position: fixed; bottom: 1.5rem; right: 1.5rem; background: var(--bg-card);
+      border: 1px solid var(--accent); color: var(--text); padding: 0.55rem 1rem;
+      border-radius: 8px; font-size: 0.73rem; font-family: 'JetBrains Mono', monospace;
+      opacity: 0; transform: translateY(8px); transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none; z-index: 9999; box-shadow: 0 4px 20px rgba(0,0,0,0.3); 
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    @media (max-width: 900px) {
+      main { padding: 1rem; } header { padding: 0 1rem; }
+      /* Stack results+chart vertically on narrow screens */
+      .results-row { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 700px) {
+      /* Stack setup panel vertically on phones */
+      .config-body { flex-direction: column; }
+      .config-divider { width: 100%; height: 1px; margin: 0.75rem 0; }
+      .config-reps { flex-wrap: wrap; }
+
+      /* Pin the sample-name column so it stays readable while horizontally
+         scrolling through technical replicates on a phone. We can't just
+         `position: sticky` inside a <td> without a background, or the cells
+         underneath would bleed through. */
+      table.in-table td.td-sample,
+      table.in-table thead tr:first-child .th-sample {
+        position: sticky;
+        left: 0;
+        background: var(--bg-surface);
+        z-index: 1;
+      }
+      /* The top-left corner cell needs to be above both the row's sticky
+         sample cell AND the thead — highest z-index wins. */
+      table.in-table thead tr:first-child .th-sample {
+        background: var(--bg-card);
+        z-index: 3;
+      }
+      /* Hover highlights were previously set on td via row:hover — boost the
+         sticky cell's background so it stays in sync. */
+      table.in-table tr:hover td.td-sample { background: var(--accent-dim); }
+    }
+  </style>
+</head>
+
+<body>
+
+<div id="lsWarning" class="ls-warning hidden" role="status">
+  ⚠ Browser storage is unavailable — your work won't be saved between sessions. (Private/incognito mode or full disk?)
+</div>
+
+<header>
+  <div class="header-left">
+    <div class="title" style="display:flex;align-items:center;">
+      <svg id="appLogo" width="34" height="34" viewBox="0 0 100 100" fill="none" style="margin-right:10px;overflow:visible;">
+        <defs>
+          <linearGradient id="curveGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%"   stop-color="var(--accent)" stop-opacity="0.3"/>
+            <stop offset="100%" stop-color="var(--accent)"/>
+          </linearGradient>
+          <style>
+            .anim-grid { opacity: 0; animation: fadeGrid 4s ease-out infinite; }
+            .anim-curve { stroke-dasharray: 180; stroke-dashoffset: 180; animation: drawCurve 4s cubic-bezier(0.4,0,0.2,1) infinite; }
+            .anim-dot { opacity: 0; transform-origin: 50px 50px; animation: popDot 4s infinite; }
+            @keyframes fadeGrid { 0%,5%{opacity:0} 15%,90%{opacity:0.35} 100%{opacity:0} }
+            @keyframes drawCurve { 0%,10%{stroke-dashoffset:180;opacity:1} 30%,90%{stroke-dashoffset:0;opacity:1} 95%,100%{stroke-dashoffset:0;opacity:0} }
+            @keyframes popDot { 0%,28%{opacity:0;transform:scale(0.3);filter:drop-shadow(0 0 0px var(--accent))}
+              32%{opacity:1;transform:scale(1.1);filter:drop-shadow(0 0 6px var(--accent))}
+              38%{transform:scale(1);filter:drop-shadow(0 0 2px var(--accent))}
+              55%{transform:scale(1.05);filter:drop-shadow(0 0 8px var(--accent))}
+              75%{transform:scale(1);filter:drop-shadow(0 0 2px var(--accent))}
+              90%{opacity:1;transform:scale(1)} 95%,100%{opacity:0;transform:scale(0.5)} }
+          </style>
+        </defs>
+        <g class="anim-grid" stroke="var(--border)" stroke-width="1.5">
+          <line x1="10" y1="75" x2="90" y2="75"/><line x1="10" y1="50" x2="90" y2="50"/>
+          <line x1="10" y1="25" x2="90" y2="25"/><line x1="10" y1="10" x2="10" y2="90"/>
+          <line x1="36" y1="10" x2="36" y2="90"/><line x1="63" y1="10" x2="63" y2="90"/>
+          <line x1="90" y1="10" x2="90" y2="90"/>
+          <line x1="8" y1="50" x2="92" y2="50" stroke="var(--warning)" stroke-width="2.5" stroke-dasharray="6 4" stroke-linecap="round"/>
+        </g>
+        <path class="anim-curve" d="M 10 85 Q 40 85, 50 50 T 90 10" stroke="url(#curveGrad)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle class="anim-dot" cx="50" cy="50" r="6" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="3"/>
+      </svg>
+      qPCR auto-calc
+    </div>
+    <div class="subtitle">Expression data analysis & chart generator</div>
+  </div>
+  
+  <div class="header-right">
+    <button class="master-switch" id="modeToggleBtn" type="button"
+            role="switch" aria-checked="false"
+            title="Toggle advanced features (per-channel efficiencies, colour pickers, extra columns)"
+            aria-label="Toggle advanced mode">
+      <span class="ms-label-simp">Simple</span>
+      <div class="track" aria-hidden="true"><div class="knob"></div></div>
+      <span class="ms-label-adv">Advanced</span>
+    </button>
+    <button class="icon-btn" id="themeToggle" type="button" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">
+      <svg id="themeIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <!-- Moon (shown when in dark mode — click to go light) -->
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" fill="currentColor"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div id="target1Dropdown" class="gene-dropdown"></div>
+<div id="ref1Dropdown"    class="gene-dropdown"></div>
+
+<main>
+
+  <div class="panel">
+    <div class="panel-header"><h2><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="7" r="2"/><line x1="3" y1="7" x2="6" y2="7"/><line x1="10" y1="7" x2="21" y2="7"/><circle cx="16" cy="17" r="2"/><line x1="3" y1="17" x2="14" y2="17"/><line x1="18" y1="17" x2="21" y2="17"/></svg>Experiment Setup</h2></div>
+    <div class="config-body">
+
+      <!-- ── Left cluster: target + reference gene blocks ── -->
+      <div class="config-genes">
+        <div class="gene-block">
+          <div class="field">
+            <label>Target Gene</label>
+            <div class="gene-name-row">
+              <input type="text" id="target1Gene" class="gene-name-input" value="BRCA1" placeholder="Search NCBI…" autocomplete="off" aria-label="Target gene symbol">
+              <input type="color" id="target1Color" class="gene-color" value="#2dd4bf" title="Choose a colour for this gene" aria-label="Target gene colour">
+            </div>
+          </div>
+          <div class="field adv-feature" style="margin-top:0.6rem;">
+            <label id="target1EffLabel" title="PCR amplification efficiency per cycle — perfect doubling = 2.0, no amplification = 1.0">BRCA1 Efficiency</label>
+            <div class="stepper">
+              <button class="step-btn dec" type="button" data-target="target1Eff" data-step="0.01" title="Decrease target efficiency by 0.01" aria-label="Decrease target efficiency">−</button>
+              <input type="number" id="target1Eff" value="2.00" min="0.01" step="0.01" aria-label="Target gene PCR efficiency">
+              <button class="step-btn inc" type="button" data-target="target1Eff" data-step="0.01" title="Increase target efficiency by 0.01" aria-label="Increase target efficiency">+</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="gene-block">
+          <div class="field">
+            <label>Reference Gene</label>
+            <div class="gene-name-row">
+              <input type="text" id="ref1Gene" class="gene-name-input" value="ACTB" placeholder="Search NCBI…" autocomplete="off" aria-label="Reference gene symbol">
+              <input type="color" id="ref1Color" class="gene-color" value="#e3a03a" title="Choose a colour for this gene" aria-label="Reference gene colour">
+            </div>
+          </div>
+          <div class="field adv-feature" style="margin-top:0.6rem;">
+            <label id="ref1EffLabel" title="PCR amplification efficiency per cycle — perfect doubling = 2.0, no amplification = 1.0">ACTB Efficiency</label>
+            <div class="stepper">
+              <button class="step-btn dec" type="button" data-target="ref1Eff" data-step="0.01" title="Decrease reference efficiency by 0.01" aria-label="Decrease reference efficiency">−</button>
+              <input type="number" id="ref1Eff" value="2.00" min="0.01" step="0.01" aria-label="Reference gene PCR efficiency">
+              <button class="step-btn inc" type="button" data-target="ref1Eff" data-step="0.01" title="Increase reference efficiency by 0.01" aria-label="Increase reference efficiency">+</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Divider ── -->
+      <div class="config-divider" aria-hidden="true"></div>
+
+      <!-- ── Right cluster: replicates only (thresholds removed) ── -->
+      <div class="config-reps">
+        <div class="field">
+          <label>Technical Replicates</label>
+          <div class="stepper">
+            <button class="step-btn dec" type="button" data-target="techReps" title="Decrease technical replicates" aria-label="Decrease technical replicates">−</button>
+            <input type="number" id="techReps" value="3" min="1" max="8" aria-label="Number of technical replicates per sample">
+            <button class="step-btn inc" type="button" data-target="techReps" title="Increase technical replicates" aria-label="Increase technical replicates">+</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Biological Replicates</label>
+          <div class="stepper">
+            <button class="step-btn dec" type="button" data-target="bioReps" title="Decrease biological replicates" aria-label="Decrease biological replicates">−</button>
+            <input type="number" id="bioReps" value="6" min="1" max="24" aria-label="Number of biological replicates">
+            <button class="step-btn inc" type="button" data-target="bioReps" title="Increase biological replicates" aria-label="Increase biological replicates">+</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <h2><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="18" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="6" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="6" cy="18" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="18" r="1.4" fill="currentColor" stroke="none"/><circle cx="18" cy="18" r="1.4" fill="currentColor" stroke="none"/></svg>Raw Ct Data</h2>
+      <div class="actions">
+        <div class="save-badge unsaved" id="saveBadge" title="Autosave status" aria-live="polite"><span class="dot">⬤</span> unsaved</div>
+        <button class="btn btn-sm icon-only" id="undoBtn" type="button" title="Undo (Ctrl/⌘+Z)" aria-label="Undo"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h7a3 3 0 0 1 3 3v0a3 3 0 0 1-3 3H6"/><polyline points="7,4 4,7 7,10"/></svg></button>
+        <button class="btn btn-sm icon-only" id="redoBtn" type="button" title="Redo (Ctrl/⌘+Shift+Z)" aria-label="Redo"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7H5a3 3 0 0 0-3 3v0a3 3 0 0 0 3 3h5"/><polyline points="9,4 12,7 9,10"/></svg></button>
+        <button class="btn btn-sm" id="loadDemoBtn" title="Load demo data into empty cells (preserves any data already entered)">↺ Load Demo</button>
+        <button class="btn btn-sm" id="clearTableBtn" title="Clear all Ct values (keeps sample names, groups, and setup)">✕ Clear table</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="in-table">
+        <thead id="inThead"></thead>
+        <tbody id="inTbody"></tbody>
+      </table>
+    </div>
+    <div style="padding:0.45rem 1.4rem;font-size:0.6rem;font-family:'JetBrains Mono',monospace;color:var(--text-dim);border-top:1px solid var(--border);">
+      Drag to select · Shift+click to extend · Ctrl+C / Ctrl+V · Drag ⋮ to reorder
+    </div>
+    
+    <div class="qc-strip" id="qcRangeStrip"></div>
+    <div class="qc-strip" id="qcSdStrip"></div>
+  </div>
+
+  <!-- ── Two-column bottom row: merged results left, chart right ── -->
+  <div class="results-row">
+
+    <div class="panel">
+      <div class="panel-header">
+        <h2><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><line x1="6" y1="20" x2="6" y2="11"/><line x1="12" y1="20" x2="12" y2="5"/><line x1="18" y1="20" x2="18" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>Expression Results</h2>
+        <div class="actions">
+          <button class="btn btn-sm" id="exportBtn" title="Export results as CSV">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+              <path d="M8 1v9M4 7l4 4 4-4M2 12v2h12v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Export CSV
+          </button>
+          <div class="res-status" id="resStatus"><span class="live-dot"></span>live</div>
+        </div>
+      </div>
+      <!-- resBody now renders the merged group+sample table -->
+      <div id="resBody"><div class="results-empty">Enter Ct values above — results update live</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <h2><svg class="panel-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="4" height="10"/><rect x="14" y="6" width="4" height="14"/><line x1="6" y1="6" x2="6" y2="10"/><line x1="4" y1="6" x2="8" y2="6"/><line x1="16" y1="3" x2="16" y2="6"/><line x1="14" y1="3" x2="18" y2="3"/></svg>Fold Change Chart</h2>
+        <div class="actions">
+          <button class="btn btn-sm" id="exportSvgBtn" title="Export chart as PNG image">↓ Export PNG</button>
+        </div>
+      </div>
+      <div class="chart-body">
+        <div class="chart-svg-wrap" id="chartBody">
+          <div class="results-empty">Chart appears once data is entered</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+  CORE MATH ENGINE
+  Separated out for clean Product logic. Handles robust stat functions
+  that ignore empty/invalid cells (preventing JS coercion bugs).
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function mean(arr) {
+  const ns = arr.map(parseFloat).filter(n => !isNaN(n) && isFinite(n));
+  return ns.length ? ns.reduce((a, b) => a + b, 0) / ns.length : NaN;
+}
+function sd(arr) {
+  const ns = arr.map(parseFloat).filter(n => !isNaN(n) && isFinite(n));
+  if (ns.length < 2) return 0;
+  const m = mean(ns);
+  return Math.sqrt(ns.reduce((s, v) => s + (v - m) ** 2, 0) / (ns.length - 1));
+}
+
+/* PRODUCT FEATURE: Outlier Detection
+  Flags a technical replicate if it strays too far from the median of its siblings.
+*/
+const CT_MIN = 5;
+const CT_MAX = 40;
+const TECH_SD_THRESH = 0.5;      // Whole-row flag: SD across all tech reps
+const OUTLIER_MAD_THRESH = 0.5;  // Per-cell flag: |Ct - median(siblings)|
+
+/* True median — averages the two middle values for even-length arrays.
+   Previously used sorted[floor(n/2)] which gave the upper-middle value and
+   was mildly biased for n=4, n=6 etc. */
+function median(arr) {
+  const ns = arr.map(parseFloat).filter(n => !isNaN(n) && isFinite(n));
+  if (!ns.length) return NaN;
+  const sorted = [...ns].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+function isOutlier(value, siblings) {
+  const v = parseFloat(value);
+  if (isNaN(v)) return false;
+  const ns = siblings.map(parseFloat).filter(n => !isNaN(n) && isFinite(n));
+  if (ns.length < 3) return false;
+  const med = median(ns);
+  return Math.abs(v - med) > OUTLIER_MAD_THRESH;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  GLOBAL STATE & PERSISTENCE
+  We use localStorage so the user doesn't lose their 96-well plate data
+  if they accidentally refresh the browser.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+const STORE_KEY = 'qpcr_calc_v2_miqe';
+
+let cfg = {
+  techReps: 3, bioReps: 6,
+  target: 'BRCA1', ref: 'ACTB',
+  targetEff: 2.00, refEff: 2.00,
+  // Per-gene colours — drive the Cq table accents, chart bars, and FC cells.
+  targetColor: '#2dd4bf',
+  refColor:    '#e3a03a',
+  isAdvanced: false
+};
+
+let rows = [];     // Stores the user's raw input data
+let results = [];  // Stores the mathematically processed per-sample data
+let sort = { col: null, dir: 1 };
+let calcTimer = null, saveTimer = null, tableTimer = null;
+const uid = () => Math.random().toString(36).slice(2, 8);
+
+let storageBroken = false;
+function saveState() {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({ cfg, rows }));
+    setSaveBadge(true);
+  } catch(e) {
+    // Most likely: quota exceeded, private-mode Safari, or cookies disabled.
+    // We flip a flag and expose a banner rather than silently swallowing.
+    if (!storageBroken) {
+      storageBroken = true;
+      const banner = document.getElementById('lsWarning');
+      if (banner) banner.classList.remove('hidden');
+    }
+    setSaveBadge(false);
+  }
+}
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return false;
+    const s = JSON.parse(raw);
+    if (s.cfg)  cfg  = { ...cfg, ...s.cfg };
+    if (s.rows) rows = s.rows;
+
+    // Apply the saved state of the Master Switch to the body tag immediately
+    if (cfg.isAdvanced) document.body.classList.add('mode-advanced');
+    const modeBtn = document.getElementById('modeToggleBtn');
+    if (modeBtn) modeBtn.setAttribute('aria-checked', cfg.isAdvanced ? 'true' : 'false');
+
+    return true;
+  } catch(e) { return false; }
+}
+function setSaveBadge(saved) {
+  const el = document.getElementById('saveBadge');
+  el.className = 'save-badge ' + (saved ? 'saved' : 'unsaved');
+  el.innerHTML = `<span class="dot">⬤</span> ${saved ? 'saved' : 'unsaved'}`;
+}
+function scheduleSave() {
+  setSaveBadge(false);
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveState, 3000);
+  scheduleUndoSnapshot();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  UNDO / REDO STACK
+  Snapshot the full mutable state ({cfg, rows}) as JSON strings into a
+  ring buffer. Debounced at 500ms so a burst of keystrokes counts as a
+  single undo step. Max 30 steps — plenty for interactive use, cheap in
+  memory (each snapshot is ~1–5 KB of stringified JSON).
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+const UNDO_MAX = 30;
+const UNDO_DEBOUNCE = 500;
+let undoStack = [];
+let redoStack = [];
+let undoTimer = null;
+let undoSuspended = false; // true while applying a snapshot, to prevent loops
+
+function snapshotState() {
+  return JSON.stringify({ cfg, rows });
+}
+function scheduleUndoSnapshot() {
+  if (undoSuspended) return;
+  clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => {
+    const snap = snapshotState();
+    // Skip if identical to the last snapshot (avoids padding the stack
+    // with no-op entries from focus/blur cycles).
+    if (undoStack.length && undoStack[undoStack.length - 1] === snap) return;
+    undoStack.push(snap);
+    if (undoStack.length > UNDO_MAX) undoStack.shift();
+    // Any new mutation invalidates the redo stack — standard editor behaviour.
+    redoStack = [];
+  }, UNDO_DEBOUNCE);
+}
+function applySnapshot(snapStr) {
+  try {
+    const s = JSON.parse(snapStr);
+    undoSuspended = true;
+    cfg  = { ...cfg, ...s.cfg };
+    rows = s.rows;
+    applyCfgToDOM();
+    updateHeaderGeneName();
+    document.body.classList.toggle('mode-advanced', cfg.isAdvanced);
+    document.getElementById('modeToggleBtn').setAttribute('aria-checked', cfg.isAdvanced ? 'true' : 'false');
+    buildHeader();
+    renderRows();
+    calculate();
+    saveState();
+    undoSuspended = false;
+  } catch(e) {
+    undoSuspended = false;
+  }
+}
+function doUndo() {
+  if (undoStack.length < 2) { showToast('Nothing to undo'); return; }
+  // The top of the stack is the *current* state; we want the one below.
+  const current = undoStack.pop();
+  redoStack.push(current);
+  applySnapshot(undoStack[undoStack.length - 1]);
+  showToast('↶ Undo');
+}
+function doRedo() {
+  if (!redoStack.length) { showToast('Nothing to redo'); return; }
+  const snap = redoStack.pop();
+  undoStack.push(snap);
+  applySnapshot(snap);
+  showToast('↷ Redo');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  GENE AUTOCOMPLETE (NCBI API Integration)
+  Debounced API calls to prevent spamming the external server.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+const apiCache = {};
+function setupGeneSearch(inputId, dropId) {
+  const input = document.getElementById(inputId);
+  const drop  = document.getElementById(dropId);
+  let active  = -1, matches = [];
+  let searchDebounce = null;
+  let searchReqId = 0;  // monotonic counter for last-query-wins
+
+  function pos() {
+    const r = input.getBoundingClientRect();
+    drop.style.top   = (r.bottom + 6) + 'px';
+    drop.style.left  = r.left + 'px';
+    drop.style.width = Math.max(r.width, 280) + 'px';
+  }
+  function render(items) {
+    matches = items; active = -1;
+    if (!items.length) { drop.classList.remove('open'); return; }
+    drop.innerHTML = items.map((g, i) =>
+      `<div class="gene-item" data-i="${i}">
+         <span class="gene-sym">${g.symbol}</span>
+         <span class="gene-name">${g.name}</span>
+       </div>`).join('');
+    drop.classList.add('open'); pos();
+    drop.querySelectorAll('.gene-item').forEach(el =>
+      el.addEventListener('mousedown', e => { e.preventDefault(); pick(matches[+el.dataset.i]); }));
+  }
+  function pick(g) {
+    input.value = g.symbol;
+    drop.classList.remove('open');
+    readCfg(); updateHeaderGeneName(); scheduleSave(); scheduleAutoCalc();
+  }
+  async function doSearch(q) {
+    // Last-query-wins: bump a per-input counter on each call and only render
+    // the response if the counter still matches by the time the fetch resolves.
+    // Prevents a slow earlier response from clobbering a faster later one when
+    // the user types quickly.
+    const myReq = ++searchReqId;
+    drop.innerHTML = '<div class="gene-loading">Searching NCBI…</div>';
+    drop.classList.add('open'); pos();
+    try {
+      const cacheKey = q.toLowerCase();
+      let hits;
+      if (apiCache[cacheKey]) hits = apiCache[cacheKey];
+      else {
+        const ctrl = new AbortController();
+        setTimeout(() => ctrl.abort(), 4000);
+        const url = `https://mygene.info/v3/query?q=${encodeURIComponent(q)}*&fields=symbol,name&size=12&sort=_score`;
+        const res = await fetch(url, { signal: ctrl.signal });
+        const data = await res.json();
+        const seen = new Set();
+        hits = (data.hits || []).filter(h => h.symbol)
+          .map(h => ({ symbol: h.symbol.toUpperCase(), name: h.name || '' }))
+          .filter(h => { if (seen.has(h.symbol)) return false; seen.add(h.symbol); return true; });
+        apiCache[cacheKey] = hits;
+      }
+      if (myReq !== searchReqId) return; // a newer search has superseded us
+      if (hits.length) render(hits);
+      else drop.innerHTML = '<div class="gene-loading">No results found</div>';
+    } catch(e) {
+      if (myReq !== searchReqId) return;
+      drop.innerHTML = '<div class="gene-loading">⚠ Search unavailable — enter symbol manually</div>';
+    }
+  }
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    if (!q) { drop.classList.remove('open'); return; }
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => doSearch(q), 250);
+    readCfg(); updateHeaderGeneName(); scheduleSave(); scheduleAutoCalc();
+  });
+  input.addEventListener('focus', () => { if (input.value.trim() && matches.length) { pos(); drop.classList.add('open'); } });
+  input.addEventListener('keydown', e => {
+    if (!drop.classList.contains('open')) return;
+    const items = drop.querySelectorAll('.gene-item');
+    if      (e.key === 'ArrowDown') { e.preventDefault(); active = Math.min(active + 1, matches.length - 1); }
+    else if (e.key === 'ArrowUp')   { e.preventDefault(); active = Math.max(active - 1, 0); }
+    else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); pick(matches[active]); return; }
+    else if (e.key === 'Escape')    { drop.classList.remove('open'); return; }
+    items.forEach((el, i) => el.classList.toggle('active', i === active));
+  });
+  input.addEventListener('blur', () => setTimeout(() => drop.classList.remove('open'), 160));
+  window.addEventListener('scroll', pos, { passive: true });
+  window.addEventListener('resize', pos, { passive: true });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  UX LOGIC: EXCEL-STYLE CELL SELECTION
+  Allows users to drag to highlight cells, and copy/paste blocks of
+  data directly from Excel without clicking into every single box.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+let selStart = null, selEnd = null;
+let mouseIsDown = false, dragHasMoved = false;
+let mouseDownEl = null, mouseDownPos = null;
+
+function absColOf(field, rep) { return field === 't' ? +rep : cfg.techReps + +rep; }
+function inSel(rowIdx, field, rep) {
+  if (!selStart || !selEnd) return false;
+  const ac = absColOf(field, rep);
+  const r1 = Math.min(selStart.rowIdx, selEnd.rowIdx), r2 = Math.max(selStart.rowIdx, selEnd.rowIdx);
+  const c1 = Math.min(selStart.absCol, selEnd.absCol),  c2 = Math.max(selStart.absCol, selEnd.absCol);
+  return +rowIdx >= r1 && +rowIdx <= r2 && ac >= c1 && ac <= c2;
+}
+function updateSelHighlight() {
+  document.querySelectorAll('input[data-f="t"], input[data-f="r"]').forEach(el =>
+    el.classList.toggle('sel', inSel(el.dataset.i, el.dataset.f, el.dataset.r)));
+}
+document.addEventListener('mousemove', e => {
+  if (!mouseIsDown || dragHasMoved) return;
+  if (Math.abs(e.clientX - mouseDownPos.x) + Math.abs(e.clientY - mouseDownPos.y) > 5)
+    dragHasMoved = true;
+});
+document.addEventListener('mouseup', () => {
+  mouseIsDown = false; dragHasMoved = false; mouseDownEl = null; mouseDownPos = null;
+  document.body.classList.remove('cell-dragging');
+});
+document.addEventListener('mouseleave', () => {
+  mouseIsDown = false; dragHasMoved = false; mouseDownEl = null; mouseDownPos = null;
+  document.body.classList.remove('cell-dragging');
+});
+document.addEventListener('mousedown', e => {
+  if (!e.target.closest('table.in-table')) { selStart = selEnd = null; updateSelHighlight(); }
+});
+
+/* Copy & Paste Interceptors */
+document.addEventListener('keydown', e => {
+  const isMac = /mac/i.test(navigator.platform);
+  const mod   = isMac ? e.metaKey : e.ctrlKey;
+  const key   = e.key.toLowerCase();  // Caps-lock safe
+
+  // Undo / Redo: Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y
+  // Skip if the target is a gene-search field (users expect native undo there).
+  const inGeneSearch = e.target.id === 'target1Gene' || e.target.id === 'ref1Gene';
+  if (mod && !inGeneSearch) {
+    if (key === 'z' && !e.shiftKey) { e.preventDefault(); doUndo(); return; }
+    if ((key === 'z' &&  e.shiftKey) || key === 'y') { e.preventDefault(); doRedo(); return; }
+  }
+
+  // CTRL+C Export Logic
+  if (mod && key === 'c' && selStart && selEnd) {
+    e.preventDefault();
+    const r1=Math.min(selStart.rowIdx,selEnd.rowIdx), r2=Math.max(selStart.rowIdx,selEnd.rowIdx);
+    const c1=Math.min(selStart.absCol,selEnd.absCol),  c2=Math.max(selStart.absCol,selEnd.absCol);
+    const lines = [];
+    for (let ri=r1; ri<=r2; ri++) {
+      const cells = [];
+      for (let ci=c1; ci<=c2; ci++) {
+        const field = ci < cfg.techReps ? 't' : 'r';
+        const rep   = ci < cfg.techReps ? ci : ci - cfg.techReps;
+        cells.push((field==='t' ? rows[ri]?.tCts[rep] : rows[ri]?.rCts[rep]) || '');
+      }
+      lines.push(cells.join('\t'));
+    }
+    navigator.clipboard.writeText(lines.join('\n')).then(() => showToast('✓ Copied'));
+  }
+  
+  // CTRL+V Import Logic (Trims trailing spaces from Excel!)
+  if (mod && key === 'v' && selStart) {
+    e.preventDefault();
+    navigator.clipboard.readText().then(text => {
+      if (!text.trim()) return;
+      const pasteGrid = text.trim().split('\n').map(r => r.split('\t').map(v => v.trim()));
+      const startRow = Math.min(selStart.rowIdx, selEnd?.rowIdx ?? selStart.rowIdx);
+      const startCol = Math.min(selStart.absCol, selEnd?.absCol ?? selStart.absCol);
+      let changed = false;
+      let truncatedRows = 0, truncatedCols = 0;
+      pasteGrid.forEach((pr, ri) => {
+        const rowIdx = startRow + ri;
+        if (rowIdx >= rows.length) { truncatedRows++; return; }
+        pr.forEach((val, ci) => {
+          const absCol = startCol + ci;
+          if (absCol >= cfg.techReps * 2) { truncatedCols++; return; }
+          const field = absCol < cfg.techReps ? 't' : 'r';
+          const rep   = absCol < cfg.techReps ? absCol : absCol - cfg.techReps;
+          if (field === 't') rows[rowIdx].tCts[rep] = val;
+          else               rows[rowIdx].rCts[rep] = val;
+          changed = true;
+        });
+      });
+      if (changed) {
+        syncCellsToDOM();
+        scheduleSave();
+        scheduleAutoCalc();
+        if (truncatedRows || truncatedCols) {
+          const bits = [];
+          if (truncatedRows) bits.push(`${truncatedRows} row${truncatedRows>1?'s':''}`);
+          if (truncatedCols) bits.push(`${truncatedCols} cell${truncatedCols>1?'s':''}`);
+          showToast(`⚠ Pasted — ${bits.join(' & ')} didn't fit`);
+        } else {
+          showToast('✓ Pasted');
+        }
+      }
+    });
+  }
+});
+
+function syncCellsToDOM() {
+  document.querySelectorAll('input[data-f="t"]').forEach(el => {
+    const i = +el.dataset.i, r = +el.dataset.r;
+    if (rows[i]) el.value = rows[i].tCts[r] ?? '';
+  });
+  document.querySelectorAll('input[data-f="r"]').forEach(el => {
+    const i = +el.dataset.i, r = +el.dataset.r;
+    if (rows[i]) el.value = rows[i].rCts[r] ?? '';
+  });
+  updateQCHighlights();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  CONFIG SYNCHRONIZATION
+  Reads inputs from the UI to update the global `cfg` object.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function setupSteppers() {
+  document.querySelectorAll('.step-btn').forEach(btn =>
+    btn.addEventListener('click', () => {
+      const el  = document.getElementById(btn.dataset.target);
+      if (!el) return;
+      // data-step allows fractional increments (e.g. 0.01 for efficiency)
+      const step = parseFloat(btn.dataset.step) || 1;
+      const min  = el.min !== '' ? parseFloat(el.min) : -Infinity;
+      const max  = el.max !== '' ? parseFloat(el.max) :  Infinity;
+      const val  = parseFloat(el.value) || 0;
+      // Round to same decimal places as step to avoid floating-point drift
+      const dp   = (step.toString().split('.')[1] || '').length;
+      el.value   = Math.max(min, Math.min(max, val + (btn.classList.contains('inc') ? step : -step))).toFixed(dp);
+      readCfg(); scheduleSave();
+      // Replicate steppers rebuild the table; others just recalculate
+      if (btn.dataset.target === 'techReps' || btn.dataset.target === 'bioReps') {
+        scheduleTableRebuild();
+      } else {
+        // Efficiency labels need updating when efficiency changes
+        updateHeaderGeneName();
+        scheduleAutoCalc();
+      }
+    }));
+}
+
+function applyGeneColors() {
+  // Push gene colours into CSS custom properties so any rule using them —
+  // the Cq header underlines, chart bars, FC cells — picks them up live.
+  const root = document.documentElement;
+  root.style.setProperty('--gene-target', cfg.targetColor);
+  root.style.setProperty('--gene-ref',    cfg.refColor);
+}
+
+function readCfg() {
+  cfg.techReps   = Math.max(1, Math.min(8,  parseInt(document.getElementById('techReps').value) || 3));
+  cfg.bioReps    = Math.max(1, Math.min(24, parseInt(document.getElementById('bioReps').value)  || 6));
+  cfg.target     = document.getElementById('target1Gene').value.trim() || 'Target';
+  cfg.ref        = document.getElementById('ref1Gene').value.trim()    || 'Reference';
+  cfg.targetEff  = Math.max(1.0, Math.min(2.0, parseFloat(document.getElementById('target1Eff').value) || 2));
+  cfg.refEff     = Math.max(1.0, Math.min(2.0, parseFloat(document.getElementById('ref1Eff').value)    || 2));
+  // Colour pickers are optional DOM nodes — tolerate their absence on first boot
+  const tc = document.getElementById('target1Color');
+  const rc = document.getElementById('ref1Color');
+  if (tc) cfg.targetColor = tc.value || cfg.targetColor;
+  if (rc) cfg.refColor    = rc.value || cfg.refColor;
+}
+
+function applyCfgToDOM() {
+  document.getElementById('techReps').value   = cfg.techReps;
+  document.getElementById('bioReps').value    = cfg.bioReps;
+  document.getElementById('target1Gene').value = cfg.target;
+  document.getElementById('ref1Gene').value    = cfg.ref;
+  document.getElementById('target1Eff').value  = cfg.targetEff.toFixed(2);
+  document.getElementById('ref1Eff').value     = cfg.refEff.toFixed(2);
+  const tc = document.getElementById('target1Color');
+  const rc = document.getElementById('ref1Color');
+  if (tc) tc.value = cfg.targetColor;
+  if (rc) rc.value = cfg.refColor;
+  applyGeneColors();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  UI RENDERING (THE DOM BUILDER)
+  Builds the interactive HTML table based on the configuration state.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+const SUB = ['₁','₂','₃','₄','₅','₆','₇','₈'];
+
+function buildHeader() {
+  const n = cfg.techReps;
+  const r1 = `<tr>
+    <th class="th-reorder" rowspan="2"></th>
+    <th class="th-sample" rowspan="2">Sample</th>
+    <th class="th-group"  rowspan="2">Group</th>
+    <th class="th-ctrl"   rowspan="2">Ctrl</th>
+    <th class="th-gene-target" colspan="${n}" id="hTargetLabel">${cfg.target}</th>
+    <th class="th-gene-ref"    colspan="${n}" id="hRefLabel">${cfg.ref}</th>
+    <th class="th-flag" rowspan="2"></th>
+    <th rowspan="2"></th>
+  </tr>`;
+  let r2 = '<tr>';
+  for (let i = 0; i < n; i++) r2 += `<th class="sub-target">Ct${SUB[i]}</th>`;
+  for (let i = 0; i < n; i++) r2 += `<th class="sub-ref">Ct${SUB[i]}</th>`;
+  r2 += '</tr>';
+  document.getElementById('inThead').innerHTML = r1 + r2;
+  syncStickyOffset();
+}
+
+/* Measure the first thead row's rendered height and push the second thead
+   row down by that amount so the two rows stack instead of overlapping.
+   Done in JS rather than CSS because the height depends on font metrics,
+   zoom level, and custom-font loading state. */
+function syncStickyOffset() {
+  const thead = document.getElementById('inThead');
+  if (!thead) return;
+  const firstRow = thead.querySelector('tr:first-child');
+  if (!firstRow) return;
+  const h = firstRow.getBoundingClientRect().height;
+  thead.querySelectorAll('tr:last-child th').forEach(th => {
+    th.style.top = `${Math.round(h)}px`;
+  });
+}
+// Re-measure if fonts finish loading after initial render
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(syncStickyOffset);
+}
+window.addEventListener('resize', syncStickyOffset);
+
+function updateHeaderGeneName() {
+  const ht = document.getElementById('hTargetLabel');
+  const hr = document.getElementById('hRefLabel');
+  if (ht) ht.textContent = cfg.target;
+  if (hr) hr.textContent = cfg.ref;
+  // Keep efficiency labels in sync with current gene names
+  const tEffLabel = document.getElementById('target1EffLabel');
+  const rEffLabel = document.getElementById('ref1EffLabel');
+  if (tEffLabel) tEffLabel.textContent = `${cfg.target || 'Target'} Efficiency`;
+  if (rEffLabel) rEffLabel.textContent = `${cfg.ref   || 'Reference'} Efficiency`;
+  // Dynamic document title — helps when the user has multiple experiments open
+  document.title = `qPCR auto-calc — ${cfg.target || 'Target'} vs ${cfg.ref || 'Reference'}`;
+}
+
+function newRow(name='', group='Treatment', isCtrl=false) {
+  return { id: uid(), name, group, isCtrl,
+           tCts: Array(cfg.techReps).fill(''),
+           rCts: Array(cfg.techReps).fill('') };
+}
+
+function resizeRow(row) {
+  const n = cfg.techReps;
+  row.tCts = Array(n).fill('').map((_, i) => row.tCts[i] ?? '');
+  row.rCts = Array(n).fill('').map((_, i) => row.rCts[i] ?? '');
+  return row;
+}
+
+function scheduleTableRebuild() {
+  clearTimeout(tableTimer);
+  tableTimer = setTimeout(rebuildTable, 250);
+}
+
+function rebuildTable() {
+  readCfg(); syncFromDOM();
+  if (rows.length > cfg.bioReps) {
+    const toRemove = rows.slice(cfg.bioReps);
+    const hasData = toRemove.some(r => r.tCts.some(v => v !== '') || r.rCts.some(v => v !== ''));
+    if (hasData) {
+      const ok = confirm(`Reducing to ${cfg.bioReps} row(s) will remove ${toRemove.length} row(s) containing data.\n\nContinue?`);
+      if (!ok) { document.getElementById('bioReps').value = rows.length; cfg.bioReps = rows.length; return; }
+    }
+    rows.splice(cfg.bioReps);
+  }
+  rows.forEach(resizeRow);
+  if (!rows.some(r => r.isCtrl) && rows.length > 0) rows[0].isCtrl = true;
+  while (rows.length < cfg.bioReps) {
+    const idx = rows.length;
+    rows.push(newRow(idx === 0 ? 'Control' : `Sample ${idx}`, idx === 0 ? 'Control' : 'Treatment', idx === 0));
+  }
+  buildHeader(); renderRows(); scheduleSave(); scheduleAutoCalc();
+}
+
+function syncFromDOM() {
+  document.querySelectorAll('input[data-f="name"]') .forEach(el => { const i=+el.dataset.i; if(rows[i]) rows[i].name  = el.value; });
+  document.querySelectorAll('input[data-f="group"]').forEach(el => { const i=+el.dataset.i; if(rows[i]) rows[i].group = el.value; });
+  document.querySelectorAll('input[data-f="t"]')    .forEach(el => { const i=+el.dataset.i, r=+el.dataset.r; if(rows[i]) rows[i].tCts[r] = el.value; });
+  document.querySelectorAll('input[data-f="r"]')    .forEach(el => { const i=+el.dataset.i, r=+el.dataset.r; if(rows[i]) rows[i].rCts[r] = el.value; });
+}
+
+function renderRows() {
+  const tbody = document.getElementById('inTbody');
+  tbody.innerHTML = '';
+  rows.forEach((row, idx) => {
+    const tr = buildRowElement(row, idx);
+    tbody.appendChild(tr);
+  });
+  updateQCHighlights();
+  updateSelHighlight();
+}
+
+function buildRowElement(row, idx) {
+  const tr = document.createElement('tr');
+  tr.draggable = false;
+  tr.dataset.idx = idx;
+  const isCtrl = !!row.isCtrl;
+  let h = '';
+  h += `<td><span class="drag-handle" title="Drag to reorder" role="button" tabindex="-1" data-drag="${idx}" aria-label="Drag to reorder row ${idx + 1}">⋮</span></td>`;
+  h += `<td class="td-sample"><input type="text" value="${esc(row.name)}"  data-f="name"  data-i="${idx}" placeholder="Sample name" aria-label="Sample name for row ${idx + 1}"></td>`;
+  h += `<td class="td-group"><input type="text" value="${esc(row.group)}" data-f="group" data-i="${idx}" placeholder="Group" aria-label="Group for row ${idx + 1}"></td>`;
+  // "Set Ctrl" button — toggles this row's control status. Multiple rows can
+  // be controls simultaneously. When active, it reads "CTRL" with accent colour.
+  h += `<td class="td-ctrl"><button type="button" class="ctrl-btn ${isCtrl ? 'is-ctrl' : ''}" data-ctrl-toggle="${idx}" title="${isCtrl ? 'Remove from control' : 'Mark as control'}" aria-pressed="${isCtrl}" aria-label="${isCtrl ? 'Remove row ' + (idx+1) + ' from control' : 'Mark row ' + (idx+1) + ' as control'}">${isCtrl ? 'CTRL' : 'set'}</button></td>`;
+
+  // Ct cells use type="text" with inputmode="decimal" rather than type="number"
+  // because the numeric type blocks programmatic access to selectionStart in
+  // some browsers and has quirky locale behaviour (accepting commas silently).
+  // We enforce numeric validity ourselves in the tbody `input` handler.
+  for (let i = 0; i < cfg.techReps; i++)
+    h += `<td><input type="text" inputmode="decimal" value="${row.tCts[i]||''}" data-f="t" data-i="${idx}" data-r="${i}" placeholder="—" aria-label="${esc(cfg.target)} technical replicate ${i+1}, row ${idx+1}"></td>`;
+  for (let i = 0; i < cfg.techReps; i++)
+    h += `<td><input type="text" inputmode="decimal" value="${row.rCts[i]||''}" data-f="r" data-i="${idx}" data-r="${i}" placeholder="—" aria-label="${esc(cfg.ref)} technical replicate ${i+1}, row ${idx+1}"></td>`;
+    
+  h += `<td><span class="row-flag hidden" data-flag="${idx}" title="" role="img" aria-label="Quality warning">⚠</span></td>`;
+  h += `<td><button class="rm-btn" type="button" data-rm="${idx}" title="Remove row" aria-label="Remove row ${idx+1}">✕</button></td>`;
+  tr.innerHTML = h;
+  return tr;
+}
+
+function esc(s) { return String(s).replace(/"/g, '&quot;'); }
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  DOM EVENT DELEGATION
+  Instead of attaching 100 event listeners to 100 input boxes, we attach
+  one listener to the Table Body that intercepts all keystrokes. Highly optimized.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function wireTableDelegation() {
+  const tbody = document.getElementById('inTbody');
+
+  tbody.addEventListener('input', e => {
+    const el = e.target;
+    const f  = el.dataset?.f;
+    if (!f) return;
+    const i = +el.dataset.i;
+    if (!rows[i]) return;
+
+    // Ct cells: accept only digits, one period, optional leading minus.
+    // Commas (German/French locales) are coerced to periods; everything else
+    // is stripped silently so the user doesn't fight the input.
+    if (f === 't' || f === 'r') {
+      const original = el.value;
+      let cleaned = original.replace(/,/g, '.').replace(/[^0-9.\-]/g, '');
+      // Collapse multiple periods to a single one (keep the first)
+      const firstDot = cleaned.indexOf('.');
+      if (firstDot !== -1) {
+        cleaned = cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, '');
+      }
+      // Minus only valid at position 0
+      if (cleaned.indexOf('-') > 0) cleaned = cleaned.replace(/-/g, (m, idx) => idx === 0 ? m : '');
+      if (cleaned !== original) {
+        const cursor = el.selectionStart - (original.length - cleaned.length);
+        el.value = cleaned;
+        try { el.setSelectionRange(cursor, cursor); } catch(e) {}
+      }
+      rows[i][f === 't' ? 'tCts' : 'rCts'][+el.dataset.r] = cleaned;
+    }
+    else if (f === 'name')  rows[i].name  = el.value;
+    else if (f === 'group') rows[i].group = el.value;
+    else return;
+
+    scheduleSave();
+    scheduleAutoCalc();
+    if (f === 't' || f === 'r') updateQCHighlights();
+  });
+
+  tbody.addEventListener('change', e => {
+    // ctrl-checkbox removed — nothing to do here now, but keep the hook
+    // in case future per-row controls reappear.
+  });
+
+  tbody.addEventListener('click', e => {
+    const ctrlBtn = e.target.closest('[data-ctrl-toggle]');
+    if (ctrlBtn) {
+      const idx = +ctrlBtn.dataset.ctrlToggle;
+      if (rows[idx]) {
+        rows[idx].isCtrl = !rows[idx].isCtrl;
+        renderRows(); scheduleSave(); scheduleAutoCalc();
+      }
+      return;
+    }
+    const rm = e.target.closest('[data-rm]');
+    if (rm) {
+      rows.splice(+rm.dataset.rm, 1);
+      cfg.bioReps = rows.length;
+      document.getElementById('bioReps').value = rows.length;
+      renderRows(); scheduleSave(); scheduleAutoCalc();
+    }
+  });
+
+  /* ── Drag-to-select for Cq cells ──
+     Missing in recent iterations; the state machine (selStart/selEnd/inSel)
+     was in place but nothing actually populated the anchor. Here we:
+       • mousedown on a Cq input = anchor + start (call preventDefault so
+         the input doesn't steal focus before we track motion)
+       • mouseenter on a Cq input while holding the mouse = extend
+       • actual focus happens in a microtask so the anchor is set first
+     This plays nicely with the existing document mouseup handler that
+     clears mouseIsDown. */
+  /* ── Drag-to-select for Cq cells ──
+     The hard part: <input> elements swallow mousedown to set the caret. We
+     can't preventDefault on mousedown without breaking click-to-edit.
+     Strategy:
+       • mousedown records an anchor but doesn't prevent default (input still focuses)
+       • once the mouse has moved past a small threshold, we flip a "dragging"
+         flag. At that point:
+           - blur the input so text selection stops growing
+           - add a body class to disable text selection globally via CSS
+           - extend selEnd on each mouseenter of another Cq cell
+       • mouseup clears everything
+     Effect: single click = cursor in cell (normal editing). Click-and-drag =
+     Excel-style rectangular selection with no text cursor fighting you. */
+  tbody.addEventListener('mousedown', e => {
+    const el = e.target;
+    const f = el.dataset?.f;
+    if (f !== 't' && f !== 'r') return;
+    const rowIdx = +el.dataset.i, rep = +el.dataset.r;
+    const absCol = absColOf(f, rep);
+    mouseIsDown = true;
+    dragHasMoved = false;
+    mouseDownEl = el;
+    mouseDownPos = { x: e.clientX, y: e.clientY };
+    if (e.shiftKey && selStart) {
+      selEnd = { rowIdx, absCol };
+    } else {
+      selStart = { rowIdx, absCol };
+      selEnd   = { rowIdx, absCol };
+    }
+    updateSelHighlight();
+  });
+
+  // Detect actual drag movement and flip into "selecting" mode.
+  // Scoped to the tbody (instead of document) because by the time we're here
+  // mouseIsDown is already true from the cell mousedown.
+  tbody.addEventListener('mousemove', e => {
+    if (!mouseIsDown || dragHasMoved) return;
+    const dx = Math.abs(e.clientX - mouseDownPos.x);
+    const dy = Math.abs(e.clientY - mouseDownPos.y);
+    if (dx + dy < 5) return;  // threshold — ignore micro-jitter
+    dragHasMoved = true;
+    // Take focus away from the anchor cell so text caret selection stops
+    if (mouseDownEl && document.activeElement === mouseDownEl) mouseDownEl.blur();
+    // Disable text selection globally while dragging
+    document.body.classList.add('cell-dragging');
+  });
+
+  tbody.addEventListener('mouseover', e => {
+    if (!mouseIsDown || !dragHasMoved) return;
+    const el = e.target;
+    const f = el.dataset?.f;
+    if (f !== 't' && f !== 'r') return;
+    const rowIdx = +el.dataset.i, rep = +el.dataset.r;
+    const absCol = absColOf(f, rep);
+    if (!selEnd || selEnd.rowIdx !== rowIdx || selEnd.absCol !== absCol) {
+      selEnd = { rowIdx, absCol };
+      updateSelHighlight();
+    }
+  });
+
+  /* Excel-style keyboard navigation for Ct cells.
+     Arrow keys move focus between cells in row-major order. Enter mimics
+     ArrowDown (standard spreadsheet convention). Tab is left to the browser
+     because it already walks the DOM in our desired order.
+
+     "Row-major" here means: within a row, cells flow left-to-right across
+     target replicates, then across reference replicates, then down to the
+     next row. We deliberately don't wrap at row edges — stopping at the
+     boundary is less surprising than silently jumping rows. */
+  tbody.addEventListener('keydown', e => {
+    const el = e.target;
+    const f  = el.dataset?.f;
+    if (f !== 't' && f !== 'r') return;
+    if (!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter'].includes(e.key)) return;
+    // Don't hijack Left/Right when the caret is in the middle of a number —
+    // users expect those keys to move the cursor inside their value first.
+    // Only navigate when the caret is at the string boundary and there's no
+    // selection. Up/Down/Enter always navigate.
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const atStart = el.selectionStart === 0 && el.selectionEnd === 0;
+      const atEnd   = el.selectionStart === el.value.length && el.selectionEnd === el.value.length;
+      if (e.key === 'ArrowLeft'  && !atStart) return;
+      if (e.key === 'ArrowRight' && !atEnd)   return;
+    }
+    e.preventDefault();
+    const rowIdx = +el.dataset.i;
+    const repIdx = +el.dataset.r;
+    // Absolute column within the row: target reps come first, then ref reps
+    const absCol = f === 't' ? repIdx : cfg.techReps + repIdx;
+    const maxCol = cfg.techReps * 2 - 1;
+    let newRow = rowIdx, newCol = absCol;
+    if (e.key === 'ArrowUp')    newRow = Math.max(0, rowIdx - 1);
+    if (e.key === 'ArrowDown' || e.key === 'Enter') newRow = Math.min(rows.length - 1, rowIdx + 1);
+    if (e.key === 'ArrowLeft')  newCol = Math.max(0, absCol - 1);
+    if (e.key === 'ArrowRight') newCol = Math.min(maxCol, absCol + 1);
+    if (newRow === rowIdx && newCol === absCol) return;
+    const newField = newCol < cfg.techReps ? 't' : 'r';
+    const newRep   = newCol < cfg.techReps ? newCol : newCol - cfg.techReps;
+    const target = document.querySelector(`input[data-f="${newField}"][data-i="${newRow}"][data-r="${newRep}"]`);
+    if (target) { target.focus(); target.select(); }
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  DRAG-TO-REORDER LOGIC
+  Allows users to reorganize their plate layout visually.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function wireRowDragReorder() {
+  const tbody = document.getElementById('inTbody');
+  let dragSrcIdx = null;
+
+  tbody.addEventListener('mousedown', e => {
+    if (e.target.classList.contains('drag-handle')) {
+      const tr = e.target.closest('tr');
+      if (tr) { tr.draggable = true; dragSrcIdx = +tr.dataset.idx; }
+    }
+  });
+
+  tbody.addEventListener('dragstart', e => {
+    const tr = e.target.closest('tr');
+    if (tr) { tr.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; }
+  });
+
+  tbody.addEventListener('dragover', e => {
+    e.preventDefault();
+    const tr = e.target.closest('tr');
+    if (!tr) return;
+    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('drag-over-top','drag-over-bottom'));
+    const rect = tr.getBoundingClientRect();
+    const mid  = rect.top + rect.height / 2;
+    tr.classList.add(e.clientY < mid ? 'drag-over-top' : 'drag-over-bottom');
+  });
+
+  tbody.addEventListener('dragleave', e => {
+    const tr = e.target.closest('tr');
+    if (tr) tr.classList.remove('drag-over-top','drag-over-bottom');
+  });
+
+  tbody.addEventListener('drop', e => {
+    e.preventDefault();
+    const tr = e.target.closest('tr');
+    if (!tr || dragSrcIdx === null) return;
+    const dstIdx = +tr.dataset.idx;
+    const rect = tr.getBoundingClientRect();
+    const mid  = rect.top + rect.height / 2;
+    let insertAt = e.clientY < mid ? dstIdx : dstIdx + 1;
+    if (dragSrcIdx < insertAt) insertAt--;
+    if (dragSrcIdx !== insertAt) {
+      const [moved] = rows.splice(dragSrcIdx, 1);
+      rows.splice(insertAt, 0, moved);
+      renderRows(); scheduleSave(); scheduleAutoCalc();
+    }
+  });
+
+  tbody.addEventListener('dragend', () => {
+    tbody.querySelectorAll('tr').forEach(r => {
+      r.classList.remove('dragging','drag-over-top','drag-over-bottom');
+      r.draggable = false;
+    });
+    dragSrcIdx = null;
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  QUALITY CONTROL (QC) HIGHLIGHTS
+  Automatically flags bad data (Ct>40, Ct<5) and massive standard 
+  deviations to stop researchers making bad conclusions.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function updateQCHighlights() {
+  document.querySelectorAll('input[data-f="t"], input[data-f="r"]').forEach(el => {
+    const i = +el.dataset.i, r = +el.dataset.r, f = el.dataset.f;
+    if (!rows[i]) return;
+    const siblings = f === 't' ? rows[i].tCts : rows[i].rCts;
+    const v = parseFloat(el.value);
+    const outOfRange = !isNaN(v) && (v < CT_MIN || v > CT_MAX);
+    const outlier   = isOutlier(el.value, siblings);
+    el.classList.toggle('qc-flag', outOfRange || outlier);
+    if (outOfRange) el.title = `Out of range (${CT_MIN}–${CT_MAX})`;
+    else if (outlier) el.title = 'Outlier compared to tech rep siblings';
+    else el.title = '';
+  });
+
+  document.querySelectorAll('[data-flag]').forEach(el => {
+    const i = +el.dataset.flag;
+    if (!rows[i]) return;
+    const sdT = sd(rows[i].tCts);
+    const sdR = sd(rows[i].rCts);
+    const flagged = sdT >= TECH_SD_THRESH || sdR >= TECH_SD_THRESH;
+    el.classList.toggle('hidden', !flagged);
+    if (flagged) {
+      el.title = `High tech-rep variability — SD(${cfg.target})=${sdT.toFixed(2)}, SD(${cfg.ref})=${sdR.toFixed(2)}`;
+    }
+  });
+}
+
+function computeQCWarnings() {
+  const rangeIssues = [];
+  const sdIssues = [];
+  rows.forEach((r, idx) => {
+    r.tCts.forEach((v, rep) => {
+      const n = parseFloat(v);
+      if (!isNaN(n) && (n < CT_MIN || n > CT_MAX))
+        rangeIssues.push(`${r.name||`Row ${idx+1}`} · ${cfg.target} Ct${SUB[rep]} = ${v}`);
+    });
+    r.rCts.forEach((v, rep) => {
+      const n = parseFloat(v);
+      if (!isNaN(n) && (n < CT_MIN || n > CT_MAX))
+        rangeIssues.push(`${r.name||`Row ${idx+1}`} · ${cfg.ref} Ct${SUB[rep]} = ${v}`);
+    });
+    const sdT = sd(r.tCts);
+    const sdR = sd(r.rCts);
+    if (sdT >= TECH_SD_THRESH) sdIssues.push(`${r.name||`Row ${idx+1}`} · ${cfg.target} tech-rep SD = ${sdT.toFixed(2)}`);
+    if (sdR >= TECH_SD_THRESH) sdIssues.push(`${r.name||`Row ${idx+1}`} · ${cfg.ref} tech-rep SD = ${sdR.toFixed(2)}`);
+  });
+  return { rangeIssues, sdIssues };
+}
+
+function renderQCStrips() {
+  const { rangeIssues, sdIssues } = computeQCWarnings();
+  const rangeEl = document.getElementById('qcRangeStrip');
+  const sdEl    = document.getElementById('qcSdStrip');
+
+  if (rangeIssues.length) {
+    rangeEl.classList.add('visible');
+    rangeEl.innerHTML = `<span class="qc-label">Warning — Ct values out of range (${CT_MIN}–${CT_MAX}):</span>
+      <ul>${rangeIssues.map(s=>`<li>${s}</li>`).join('')}</ul>`;
+  } else rangeEl.classList.remove('visible');
+
+  if (sdIssues.length) {
+    sdEl.classList.add('visible');
+    sdEl.innerHTML = `<span class="qc-label">Warning — Tech-rep SD ≥ ${TECH_SD_THRESH} (review pipetting / outliers):</span>
+      <ul>${sdIssues.map(s=>`<li>${s}</li>`).join('')}</ul>`;
+  } else sdEl.classList.remove('visible');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  MIQE 2.0 CALCULATOR ENGINE (THE MATHEMATICS)
+  This is the crown jewel. Instead of subtracting Cts (which assumes 100% 
+  efficiency), this converts raw Cts into efficiency-corrected "quantities" 
+  first, comparing them to the mean of the control group.
+
+  Group-level statistics live in ln(FC) space: we take the geometric mean
+  of sample fold changes within a group and derive asymmetric error bars
+  by exponentiating mean(ln FC) ± SD(ln FC). This is base-agnostic and
+  correct under any efficiency combination (Livak or Pfaffl).
+
+  If the user is in "Simple Mode", we silently force both efficiencies to
+  2.0, which collapses the Pfaffl ratio to the classical Livak 2^(−ΔΔCt).
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function scheduleAutoCalc() {
+  clearTimeout(calcTimer);
+  calcTimer = setTimeout(calculate, 300);
+}
+
+function calculate() {
+  const ctrlRows = rows.filter(r => r.isCtrl);
+  if (!ctrlRows.length) { setEmpty('Mark at least one row as control to see results'); return; }
+
+  // 1. Establish the "Master Reference Point" (Mean Ct of all Controls)
+  const meanCtrlT = mean(ctrlRows.map(r => mean(r.tCts)));
+  const meanCtrlR = mean(ctrlRows.map(r => mean(r.rCts)));
+  
+  if (isNaN(meanCtrlT) || isNaN(meanCtrlR)) { 
+    setEmpty('Add valid Ct values to your control row(s)'); return; 
+  }
+
+  // 2. Determine Efficiencies based on Master Switch State
+  const eT = cfg.isAdvanced ? cfg.targetEff : 2.0;
+  const eR = cfg.isAdvanced ? cfg.refEff : 2.0;
+
+  let anyValid = false;
+  
+  // 3. Process every single sample row
+  results = rows.map(row => {
+    const tM = mean(row.tCts);
+    const rM = mean(row.rCts); // mean() already returns NaN for all-blank arrays; no clamp needed
+
+    // THE MIQE 2.0 PFAFFL RATIO
+    // Compares the efficiency-corrected quantity of the sample vs the control group
+    const ratioT = Math.pow(eT, meanCtrlT - tM);
+    const ratioR = Math.pow(eR, meanCtrlR - rM);
+
+    // Fold Change (Normalized Expression)
+    const fc = ratioT / ratioR;
+    
+    // −log₂(FC): equals ΔΔCt under Livak (E=2), and a valid log-space
+    // descriptor of the Pfaffl fold change otherwise. Honest under both.
+    const ddCt = isNaN(fc) || fc <= 0 ? NaN : -Math.log2(fc);
+    
+    // Legacy simple subtraction for display purposes only
+    const dCt = tM - rM;
+
+    if (!isNaN(fc)) anyValid = true;
+    
+    return { 
+      name: row.name||'—', group: row.group||'—', isCtrl: !!row.isCtrl,
+      dCt: isNaN(dCt)?null:dCt, 
+      ddCt: isNaN(ddCt)?null:ddCt,
+      fc: isNaN(fc)?null:fc 
+    };
+  });
+
+  if (!anyValid) { setEmpty('Enter Ct values above — results update live'); return; }
+  
+  renderResults();
+  renderSummary();
+  renderChart();
+  renderQCStrips();
+}
+
+function setEmpty(msg) {
+  results = [];
+  document.getElementById('resBody').innerHTML   = `<div class="results-empty">${msg}</div>`;
+  document.getElementById('chartBody').innerHTML = `<div class="results-empty">${msg}</div>`;
+  document.getElementById('resStatus').innerHTML = `<span class="live-dot"></span>live`;
+  renderQCStrips();
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  MERGED EXPRESSION RESULTS TABLE
+  One table replaces two. Rows are groups (geometric mean FC ± SD range,
+  individual FC dots). Click a group row to expand and see individual
+  sample FCs as child rows. ΔCt and −log₂FC are removed from the table
+  but still exported in the CSV for anyone who needs them downstream.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function renderResults() {
+  const groups = computeGroups();
+  if (!groups.length) return;
+
+  // Also build a per-sample lookup keyed by group name for expansion rows
+  const samplesByGroup = {};
+  results.forEach(r => {
+    const g = r.group || '—';
+    if (!samplesByGroup[g]) samplesByGroup[g] = [];
+    samplesByGroup[g].push(r);
+  });
+
+  // No more up/down/flat thresholds — colouring is by gene now.
+  // renderResults still uses `fcDir` for the subtle 'flat' case (null values)
+  // so keep the helper but collapse to null vs present.
+  const fcDir = fc => fc === null ? 'flat' : 'present';
+
+  // Expand-icon SVG: a right-pointing chevron
+  const chevron = `<svg class="expand-icon" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><polyline points="4,2 8,6 4,10"/></svg>`;
+
+  let html = `<table class="res-table">
+    <thead><tr>
+      <th data-sc="group">Group<span class="sort-icon"><svg viewBox="0 0 10 10" fill="none"><path d="M5 1 L7.5 3.5 L2.5 3.5 Z M5 9 L7.5 6.5 L2.5 6.5 Z" fill="currentColor"/></svg></span></th>
+      <th style="width:3rem;text-align:center;" title="Number of samples in this group">n</th>
+      <th data-sc="fc">Geo. Mean FC<span class="sort-icon"><svg viewBox="0 0 10 10" fill="none"><path d="M5 1 L7.5 3.5 L2.5 3.5 Z M5 9 L7.5 6.5 L2.5 6.5 Z" fill="currentColor"/></svg></span></th>
+      <th title="±1 SD computed in log-space, presented asymmetrically on the linear scale">±SD Range</th>
+    </tr></thead><tbody>`;
+
+  groups.forEach(g => {
+    const dir  = fcDir(g.meanFc);
+    const pill = g.isCtrl ? '<span class="ctrl-pill">CTRL</span>' : '';
+    const meanStr = g.meanFc !== null ? `<span class="fc-val ${dir}">${g.meanFc.toFixed(3)}×</span>` : '—';
+    const rangeStr = (g.n >= 2 && g.fcLo !== null && g.fcHi !== null)
+      ? `<span class="sum-range ${dir}">${g.fcLo.toFixed(3)} – ${g.fcHi.toFixed(3)}</span>` : '<span class="sum-dim">—</span>';
+
+    const samples = samplesByGroup[g.name] || [];
+    const groupId = `grp-${g.name.replace(/\W/g, '_')}`;
+    html += `<tr class="group-row" data-group="${groupId}" title="Click to expand individual samples">
+      <td>${chevron}<span class="sum-group">${g.name}</span>${pill}</td>
+      <td style="text-align:center;" class="sum-dim">${g.n}</td>
+      <td>${meanStr}</td>
+      <td>${rangeStr}</td>
+    </tr>`;
+
+    // Individual sample child rows (hidden until expanded)
+    samples.forEach(s => {
+      const sDir = fcDir(s.fc);
+      const sPill = s.isCtrl ? '<span class="ctrl-pill">CTRL</span>' : '';
+      html += `<tr class="sample-row" data-group="${groupId}">
+        <td><span class="sname">${s.name}</span>${sPill}</td>
+        <td></td>
+        <td><span class="fc-val ${sDir}">${s.fc !== null ? s.fc.toFixed(3)+'×' : '—'}</span></td>
+        <td></td>
+      </tr>`;
+    });
+  });
+
+  html += '</tbody></table>';
+  document.getElementById('resBody').innerHTML = html;
+
+  const ctrlCount = results.filter(r => r.isCtrl).length;
+  document.getElementById('resStatus').innerHTML =
+    `<span class="live-dot"></span>live · ${results.length} samples · ${ctrlCount} ctrl`;
+
+  // Wire group-row click to toggle expansion
+  document.querySelectorAll('.group-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const id = row.dataset.group;
+      const expanded = row.classList.toggle('expanded');
+      document.querySelectorAll(`.sample-row[data-group="${id}"]`)
+        .forEach(sr => sr.classList.toggle('visible', expanded));
+    });
+  });
+
+  // Sort click handlers on th[data-sc]
+  document.querySelectorAll('.res-table th[data-sc]').forEach(th =>
+    th.addEventListener('click', () => {
+      const c = th.dataset.sc;
+      sort.dir = sort.col === c ? sort.dir * -1 : 1;
+      sort.col = c;
+      renderResults();
+    }));
+}
+
+// renderSummary is now merged into renderResults — kept as no-op for
+// any lingering call sites during the multi-gene refactor.
+function renderSummary() {}
+function computeGroups() {
+  const map = {};
+  // Bucket each sample's fold change into its group
+  results.forEach(r => {
+    const g = r.group || '—';
+    if (!map[g]) map[g] = { name: g, fcs: [], isCtrl: false };
+    if (r.fc !== null && r.fc > 0) map[g].fcs.push(r.fc);
+    if (r.isCtrl) map[g].isCtrl = true;
+  });
+
+  return Object.values(map).map(g => {
+    // Work entirely in natural log space — base-agnostic and correct
+    // under any efficiency combination (Pfaffl or Livak).
+    // Fold changes are assumed log-normal, so we average in log space
+    // and exponentiate back to get the geometric mean.
+    const lnFcs   = g.fcs.map(Math.log);
+    const meanLn  = mean(lnFcs);
+    const sdLn    = sd(lnFcs);
+
+    const meanFc = isNaN(meanLn) ? null : Math.exp(meanLn);
+    const fcHi   = isNaN(meanLn) ? null : Math.exp(meanLn + sdLn);
+    const fcLo   = isNaN(meanLn) ? null : Math.exp(meanLn - sdLn);
+
+    // Also expose log₂(FC) SD for the advanced results panel (familiar units)
+    const sdLog2 = sdLn / Math.LN2;
+
+    return { name: g.name, n: g.fcs.length, meanFc, sdLog2, fcHi, fcLo, isCtrl: g.isCtrl };
+  });
+}
+
+// renderSummary is merged into renderResults — retained as a no-op
+// so any call sites don't throw during the multi-gene refactor.
+function renderSummary() {}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  SVG BAR CHART GENERATOR
+  Renders the groups dynamically using math to plot the SVG vectors.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function renderChart() {
+  const groups = computeGroups().filter(g => g.meanFc !== null);
+  const el     = document.getElementById('chartBody');
+  if (!groups.length) { el.innerHTML = '<div class="results-empty">No group data to chart</div>'; return; }
+
+  // Minimal preview chart: bars, gene-coloured, with value labels above.
+  // No Y-axis ticks, no ref line, no rotated X labels — this is a glance
+  // visualisation, not a publication figure.
+  const W = 720, H = 240, MT = 24, MR = 20, MB = 36, ML = 20;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const maxVal = Math.max(1.2, ...groups.map(g => (g.fcHi ?? g.meanFc ?? 0))) * 1.12;
+  const y  = v => MT + plotH - Math.max(0, (v / maxVal) * plotH);
+  const y0 = y(0);
+  const n  = groups.length;
+  // Cap slot width so two bars don't spread across the whole canvas like billboards
+  const MAX_SLOT = 100;
+  const slotW = Math.min(MAX_SLOT, plotW / n);
+  const bW    = Math.min(56, slotW * 0.55);
+  // Centre the cluster in the available plot area when the slots don't fill it
+  const clusterW = slotW * n;
+  const offsetX  = ML + (plotW - clusterW) / 2;
+
+  // Baseline — a single line at y=0, nothing more
+  const baseline = `<line x1="${offsetX}" y1="${y0}" x2="${offsetX + clusterW}" y2="${y0}" stroke="var(--border)" stroke-width="1"/>`;
+
+  let bars = '', errBars = '', valLabels = '', xLabels = '';
+  groups.forEach((g, i) => {
+    const cx   = offsetX + (i + 0.5) * slotW;
+    const ytop = y(g.meanFc || 0);
+    const col  = cfg.targetColor;
+
+    bars += `<rect x="${cx-bW/2}" y="${ytop}" width="${bW}" height="${Math.max(1,y0-ytop)}" fill="${col}" rx="3" ry="3"/>`;
+
+    // Asymmetric whiskers (±1 SD in log-space)
+    if (g.n >= 2 && g.fcHi !== null && g.fcLo !== null) {
+      const yHi = y(g.fcHi);
+      const yLo = y(Math.max(0, g.fcLo));
+      const ew = 7;
+      errBars += `<line x1="${cx}"    y1="${yHi}" x2="${cx}"    y2="${yLo}" stroke="${col}" stroke-width="1.6"/>`;
+      errBars += `<line x1="${cx-ew}" y1="${yHi}" x2="${cx+ew}" y2="${yHi}" stroke="${col}" stroke-width="1.6"/>`;
+      errBars += `<line x1="${cx-ew}" y1="${yLo}" x2="${cx+ew}" y2="${yLo}" stroke="${col}" stroke-width="1.6"/>`;
+    }
+
+    // Value label above the bar (above the whisker if one exists)
+    const topY   = g.n >= 2 && g.fcHi !== null ? y(g.fcHi) : ytop;
+    const labelY = topY - 6;
+    valLabels += `<text x="${cx}" y="${labelY}" text-anchor="middle" font-size="11" font-weight="600" fill="var(--text)" font-family="'JetBrains Mono',monospace">${(g.meanFc||0).toFixed(2)}×</text>`;
+    // Horizontal group label below baseline (no rotation)
+    const ly = y0 + 18;
+    xLabels += `<text x="${cx}" y="${ly}" text-anchor="middle" font-size="11" fill="var(--text-muted)" font-family="'Syne',sans-serif">${g.name}</text>`;
+  });
+
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block;">
+    ${baseline}${bars}${errBars}${valLabels}${xLabels}
+  </svg>`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+  PNG CHART EXPORT
+  SVG exports stripped the CSS-variable bar colours because those
+  require a live document to resolve. Instead we:
+  1. Inline all CSS variable values into the SVG as concrete colours
+  2. Serialise it to a data URL via Blob + URL.createObjectURL
+  3. Draw it onto an off-screen <canvas> at 2× pixel density (retina)
+  4. Export the canvas as a PNG
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function exportChartPNG() {
+  const svgEl = document.querySelector('#chartBody svg');
+  if (!svgEl) { showToast('⚠ No chart to export'); return; }
+
+  // Step 1: Clone and resolve all CSS variables to concrete values
+  const clone  = svgEl.cloneNode(true);
+  const styles = getComputedStyle(document.documentElement);
+  const vars   = ['--accent','--border','--text','--text-muted','--bg-surface','--bg',
+                  '--fc-up','--fc-down','--fc-flat','--warning','--error'];
+  const rep = {};
+  vars.forEach(v => { rep[`var(${v})`] = styles.getPropertyValue(v).trim(); });
+
+  clone.querySelectorAll('*').forEach(node => {
+    ['fill','stroke','stop-color'].forEach(attr => {
+      const val = node.getAttribute(attr);
+      if (val && rep[val]) node.setAttribute(attr, rep[val]);
+    });
+    // Also resolve any inline style properties that reference CSS vars
+    if (node.style) {
+      ['fill','stroke','background','color'].forEach(prop => {
+        const val = node.style[prop];
+        if (val && rep[val]) node.style[prop] = rep[val];
+      });
+    }
+  });
+
+  // Add a solid background rect so the PNG isn't transparent
+  const bg   = document.createElementNS('http://www.w3.org/2000/svg','rect');
+  const w    = svgEl.viewBox.baseVal.width  || svgEl.clientWidth;
+  const h    = svgEl.viewBox.baseVal.height || svgEl.clientHeight;
+  bg.setAttribute('x','0'); bg.setAttribute('y','0');
+  bg.setAttribute('width', w); bg.setAttribute('height', h);
+  bg.setAttribute('fill', styles.getPropertyValue('--bg-surface').trim());
+  clone.insertBefore(bg, clone.firstChild);
+  clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+  clone.setAttribute('width', w);
+  clone.setAttribute('height', h);
+
+  // Step 2: Serialise to a Blob URL
+  const svgStr  = new XMLSerializer().serializeToString(clone);
+  const blob    = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+  const url     = URL.createObjectURL(blob);
+
+  // Step 3: Draw onto a 2× canvas for crisp retina output
+  const SCALE   = 2;
+  const canvas  = document.createElement('canvas');
+  canvas.width  = w * SCALE;
+  canvas.height = h * SCALE;
+  const ctx     = canvas.getContext('2d');
+  ctx.scale(SCALE, SCALE);
+
+  const img = new Image();
+  img.onload = () => {
+    ctx.drawImage(img, 0, 0);
+    URL.revokeObjectURL(url);
+    const d  = new Date();
+    const dt = d.getFullYear().toString()
+             + String(d.getMonth()+1).padStart(2,'0')
+             + String(d.getDate()).padStart(2,'0');
+    const a  = Object.assign(document.createElement('a'), {
+      href:     canvas.toDataURL('image/png'),
+      download: `${dt}_${safeFilePart(cfg.target)}_${safeFilePart(cfg.ref)}_chart.png`,
+    });
+    a.click();
+    showToast('✓ PNG exported');
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); showToast('⚠ Export failed — try a different browser'); };
+  img.src = url;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  CSV EXPORT
+  Appends the UTF-8 Byte Order Mark (\uFEFF) so Excel reads it perfectly.
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+function exportCSV() {
+  if (!results.length) { showToast('⚠ Nothing to export yet'); return; }
+  const d  = new Date();
+  const dt = d.getFullYear().toString() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+  const rows_csv = [
+    ['Sample','Group','Control','ΔCt','−log₂(FC)','Fold Change'],
+    ...results.map(r => [
+      `"${r.name}"`, `"${r.group}"`, r.isCtrl?'YES':'NO',
+      r.dCt  != null ? r.dCt.toFixed(4)  : '',
+      r.ddCt != null ? r.ddCt.toFixed(4) : '',
+      r.fc   != null ? r.fc.toFixed(4)   : '',
+    ])
+  ];
+  const csv  = '\uFEFF' + rows_csv.map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const fname = `${dt}_${safeFilePart(cfg.target)}_${safeFilePart(cfg.ref)}.csv`;
+  const a    = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(blob),
+    download: fname,
+  });
+  a.click();
+  showToast(`✓ Exported ${fname}`);
+}
+
+/* Sanitise user-typed gene names for use inside a filename.
+   Keeps alphanumerics and underscores; anything else (spaces, Greek letters,
+   punctuation, emoji, path separators) is stripped. Falls back to 'gene' if
+   the result is empty so we never produce "20260421__.csv". */
+function safeFilePart(s) {
+  const cleaned = String(s || '').replace(/[^A-Za-z0-9_]/g, '');
+  return cleaned || 'gene';
+}
+
+
+/* Toast queue — displays messages sequentially so rapid-fire actions (e.g.
+   paste → recalc → save) don't clobber each other. Each toast shows for
+   `TOAST_DURATION` ms, then the next one slides in. */
+const TOAST_DURATION = 2400;
+const TOAST_GAP = 180;
+let toastQueue = [];
+let toastShowing = false;
+function showToast(msg) {
+  toastQueue.push(msg);
+  if (!toastShowing) processToastQueue();
+}
+function processToastQueue() {
+  if (!toastQueue.length) { toastShowing = false; return; }
+  toastShowing = true;
+  const msg = toastQueue.shift();
+  const el  = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(processToastQueue, TOAST_GAP);
+  }, TOAST_DURATION);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  DEMO DATA FACTORY
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+const DEMO_DATA = [
+  {name:'Control A',    group:'Control',     isCtrl:true,  t:[22.10,22.28,21.97], r:[18.51,18.63,18.44]},
+  {name:'Control B',    group:'Control',     isCtrl:true,  t:[22.05,21.95,22.18], r:[18.49,18.55,18.60]},
+  {name:'Treatment 1A', group:'Treatment 1', isCtrl:false, t:[24.20,24.05,24.13], r:[18.52,18.70,18.55]},
+  {name:'Treatment 1B', group:'Treatment 1', isCtrl:false, t:[24.35,24.11,24.28], r:[18.58,18.62,18.49]},
+  {name:'Treatment 2A', group:'Treatment 2', isCtrl:false, t:[19.88,20.07,19.99], r:[18.62,18.50,18.71]},
+  {name:'Treatment 2B', group:'Treatment 2', isCtrl:false, t:[19.72,19.91,20.01], r:[18.55,18.60,18.66]},
+];
+function loadDemo() {
+  rows = DEMO_DATA.slice(0, cfg.bioReps).map(s => ({
+    id: uid(), name: s.name, group: s.group, isCtrl: s.isCtrl,
+    tCts: s.t.slice(0, cfg.techReps).map(String),
+    rCts: s.r.slice(0, cfg.techReps).map(String),
+  }));
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  EVENT WIRING (Connecting the HTML to the JS)
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+
+/* --- THE MASTER SWITCH TOGGLE --- */
+document.getElementById('modeToggleBtn').addEventListener('click', () => {
+  cfg.isAdvanced = !cfg.isAdvanced; 
+  document.body.classList.toggle('mode-advanced', cfg.isAdvanced); 
+  document.getElementById('modeToggleBtn').setAttribute('aria-checked', cfg.isAdvanced ? 'true' : 'false');
+  scheduleSave();
+  scheduleAutoCalc();
+  // No toast — the visual state of the switch itself is feedback enough
+});
+
+
+// SVG paths for the theme-toggle icon — we swap the inner path content
+// rather than replacing the whole <svg>, so focus/aria state survives.
+const THEME_ICONS = {
+  // Moon: shown while in dark mode (clicking it goes light)
+  dark:  '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" fill="currentColor"/>',
+  // Sun:  shown while in light mode (clicking it goes dark)
+  light: '<circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"/>'
+};
+function applyThemeIcon(themeName) {
+  const icon = document.getElementById('themeIcon');
+  if (icon) icon.innerHTML = THEME_ICONS[themeName] || THEME_ICONS.dark;
+}
+
+document.getElementById('themeToggle').addEventListener('click', () => {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  const next = dark ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  applyThemeIcon(next);
+  scheduleSave();
+  if (results.length) renderChart();
+});
+
+document.getElementById('exportBtn').addEventListener('click', exportCSV);
+document.getElementById('exportSvgBtn').addEventListener('click', exportChartPNG);
+document.getElementById('undoBtn').addEventListener('click', doUndo);
+document.getElementById('redoBtn').addEventListener('click', doRedo);
+// Rewrite tooltips with the right modifier symbol for Mac users
+(() => {
+  const isMac = /mac/i.test(navigator.platform);
+  const mod = isMac ? '⌘' : 'Ctrl';
+  document.getElementById('undoBtn').title = `Undo (${mod}+Z)`;
+  document.getElementById('redoBtn').title = `Redo (${mod}+Shift+Z)`;
+})();
+
+setupSteppers();
+
+['techReps','bioReps'].forEach(id =>
+  document.getElementById(id).addEventListener('input', () => { readCfg(); scheduleSave(); scheduleTableRebuild(); }));
+['target1Gene','ref1Gene'].forEach(id =>
+  document.getElementById(id).addEventListener('input', () => { readCfg(); updateHeaderGeneName(); scheduleSave(); scheduleAutoCalc(); }));
+// Efficiency, colour picker, and gene-name input listeners
+['target1Eff','ref1Eff'].forEach(id =>
+  document.getElementById(id).addEventListener('input', () => { readCfg(); updateHeaderGeneName(); scheduleSave(); scheduleAutoCalc(); }));
+['target1Color','ref1Color'].forEach(id =>
+  document.getElementById(id).addEventListener('input', () => { readCfg(); applyGeneColors(); scheduleSave(); if (results.length) renderChart(); }));
+
+document.getElementById('loadDemoBtn').addEventListener('click', () => {
+  syncFromDOM();
+  // Non-destructive: only populate cells that are currently empty, cycling
+  // through DEMO_DATA by row index. Keeps the user's sample names, groups,
+  // control marks, gene selections and any Ct values they've already entered.
+  let filled = 0;
+  rows.forEach((row, idx) => {
+    const src = DEMO_DATA[idx % DEMO_DATA.length];
+    for (let i = 0; i < cfg.techReps; i++) {
+      if (row.tCts[i] === '' || row.tCts[i] == null) {
+        row.tCts[i] = String(src.t[i % src.t.length]);
+        filled++;
+      }
+      if (row.rCts[i] === '' || row.rCts[i] == null) {
+        row.rCts[i] = String(src.r[i % src.r.length]);
+        filled++;
+      }
+    }
+  });
+  renderRows(); scheduleSave(); scheduleAutoCalc();
+  showToast(filled ? `↺ Demo values filled in ${filled} empty cell${filled > 1 ? 's' : ''}` : '↺ No empty cells to fill');
+});
+
+document.getElementById('clearTableBtn').addEventListener('click', () => {
+  syncFromDOM();
+  const hasData = rows.some(r => r.tCts.some(v => v !== '') || r.rCts.some(v => v !== ''));
+  if (!hasData) { showToast('Table already empty'); return; }
+  if (!confirm('Clear all Ct values?\n\nSample names, groups, control marks, gene selection and experiment setup are preserved.')) return;
+  rows.forEach(r => {
+    r.tCts = Array(cfg.techReps).fill('');
+    r.rCts = Array(cfg.techReps).fill('');
+  });
+  renderRows(); scheduleSave(); scheduleAutoCalc();
+  showToast('✓ Table cleared');
+});
+
+
+/* ═══════════════════════════════════════════════════════════════════
+  BOOT SEQUENCE (Runs once when the page loads)
+  ═══════════════════════════════════════════════════════════════════ 
+*/
+setupGeneSearch('target1Gene', 'target1Dropdown');
+setupGeneSearch('ref1Gene',    'ref1Dropdown');
+
+// Probe storage immediately so a banner can inform the user before any save
+// attempt. Writing a tiny test key is the only reliable cross-browser probe —
+// simply checking `window.localStorage` isn't enough (private-mode Safari has
+// the object but throws on write).
+try {
+  const probe = '__qpcr_probe__';
+  localStorage.setItem(probe, '1');
+  localStorage.removeItem(probe);
+} catch(e) {
+  storageBroken = true;
+  const banner = document.getElementById('lsWarning');
+  if (banner) banner.classList.remove('hidden');
+}
+
+const restored = loadState();
+if (!restored) loadDemo();
+
+applyCfgToDOM();
+updateHeaderGeneName();
+buildHeader();
+renderRows();
+wireTableDelegation();
+wireRowDragReorder();
+calculate();
+
+if (restored) { setSaveBadge(true); showToast('↩ Session restored'); }
+
+// Seed the undo stack with the current state so the first undo has a target.
+undoStack.push(snapshotState());
+
+</script>
+</body>
+</html>
