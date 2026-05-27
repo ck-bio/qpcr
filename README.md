@@ -1,4 +1,4 @@
-# qPCR* <p align="left">  <img src="image/logo.svg" width="60" alt="logo" />
+# qPCR* <p align="left">  <img src="images/logo.svg" width="60" alt="logo" />
 A browser-based, qPCR fold change calculator aimed at students and researchers alike. No installation. No server. No data leaves your machine.
 Built to replace messy Excel workflows that accumulate errors and produce invalid results.
 
