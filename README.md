@@ -89,6 +89,6 @@ Group-level fold changes are computed from the **mean ΔCt** of replicates, not 
 
 ## Contributing
 
-Bug reports and feature requests welcome via [GitHub Issues](https://github.com/username/qpcr/issues).
+Bug reports and feature requests welcome via [GitHub Issues](https://github.com/ck-bio/qpcr/issues).
 
 This is a single-file vanilla HTML/CSS/JS project — no build tools, no framework, no npm. Pull requests should maintain that constraint.
